@@ -65,11 +65,45 @@ def next_trading_time():
 
 
 def discover_main_contract(api):
+    """
+    按持仓量（open_interest）确定鸡蛋主力合约。
+    TqSdk 免费版不支持 KQ.m@DCE.JD 主力连续格式，
+    因此从 DCE 未过期鸡蛋合约中选持仓量最大的。
+    """
     quotes = api.query_quotes(ins_class="FUTURE", exchange_id="DCE", expired=False)
     jd_contracts = sorted([q for q in quotes if "jd" in q.lower()])
-    if jd_contracts:
+
+    if not jd_contracts:
+        return "DCE.jd2605"
+    if len(jd_contracts) == 1:
         return jd_contracts[0]
-    return "DCE.jd2605"
+
+    jd_quotes = {c: api.get_quote(c) for c in jd_contracts}
+    deadline = _time.time() + 5
+    while _time.time() < deadline:
+        api.wait_update(deadline=_time.time())
+
+    best_code = jd_contracts[0]
+    best_oi = 0
+    for code in jd_contracts:
+        q = jd_quotes[code]
+        oi = getattr(q, "open_interest", 0) or 0
+        if oi > best_oi:
+            best_oi = oi
+            best_code = code
+
+    if best_oi == 0:
+        return jd_contracts[0]
+
+    print(f"  持仓最大: {best_code} ({int(best_oi)} 手)")
+    others = sorted(
+        [(c, getattr(jd_quotes[c], "open_interest", 0) or 0) for c in jd_contracts],
+        key=lambda x: x[1], reverse=True
+    )
+    if len(others) > 1:
+        print(f"  其他: " + ", ".join(f"{c}({int(oi)})" for c, oi in others[1:5]))
+
+    return best_code
 
 
 def fmt_time(ns):
