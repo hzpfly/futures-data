@@ -10,6 +10,7 @@
 """
 
 from tqsdk import TqApi, TqAuth
+import pandas as pd
 from datetime import datetime, time
 import time as _time
 from config_loader import get_tqsdk_auth
@@ -87,6 +88,74 @@ def fmt_time(ns_datetime):
     return "---"
 
 
+def calc_macd(klines, fast=12, slow=26, signal=9):
+    """计算 MACD：返回 (DIF, DEA, MACD柱) 三个 Series"""
+    closes = klines["close"]
+    ema12  = closes.ewm(span=fast, adjust=False).mean()
+    ema26  = closes.ewm(span=slow, adjust=False).mean()
+    dif    = ema12 - ema26
+    dea    = dif.ewm(span=signal, adjust=False).mean()
+    bar    = 2 * (dif - dea)
+    return dif, dea, bar
+
+
+def print_macd_summary(klines):
+    """在 25 分钟 K 线下方打印 MACD 指标"""
+    dif, dea, bar = calc_macd(klines)
+    # 最近 4 根
+    recent_idx = klines.index[-4:]
+    if len(recent_idx) < 2:
+        return
+
+    print(f"\n  ── 25分钟 MACD (12,26,9) ──")
+    print(f"  {'时间':<16} {'DIF':>8} {'DEA':>8} {'MACD柱':>8} {'信号':>6}")
+    print("  " + "-" * 58)
+
+    for idx in recent_idx:
+        if idx >= len(dif):
+            break
+        t = fmt_time(klines.loc[idx, "datetime"])
+        d = dif.iloc[idx]
+        e = dea.iloc[idx]
+        b = bar.iloc[idx]
+        if pd.isna(d) or pd.isna(e):
+            continue
+        if b >= 0:
+            s = f"\033[31m▲ 多\033[0m"    # 红柱 = 多头
+        else:
+            s = f"\033[32m▼ 空\033[0m"    # 绿柱 = 空头
+        print(f"  {t:<16} {d:>8.2f} {e:>8.2f} {b:>8.2f} {s}")
+
+    # 最新信号判断
+    last_d = dif.iloc[-1]
+    last_e = dea.iloc[-1]
+    last_b = bar.iloc[-1]
+    if pd.isna(last_d) or pd.isna(last_e):
+        return
+    if last_b > 0:
+        summary = "DIF在DEA上方，多头主导"
+    else:
+        summary = "DIF在DEA下方，空头主导"
+    if last_d > last_e and last_d > 0:
+        summary += " | DIF>0且>DEA → 强势多头 ⚠️"
+    elif last_d < last_e and last_d < 0:
+        summary += " | DIF<0且<DEA → 强势空头 ⚠️"
+
+    # 金叉/死叉检测
+    if len(recent_idx) >= 2:
+        d_prev = dif.iloc[-2]
+        e_prev = dea.iloc[-2]
+        d_cur  = dif.iloc[-1]
+        e_cur  = dea.iloc[-1]
+        if d_prev <= e_prev and d_cur > e_cur:
+            summary += " | 🆕 金叉!"
+        elif d_prev >= e_prev and d_cur < e_cur:
+            summary += " | 🆕 死叉!"
+
+    print(f"  → {summary}")
+    print()
+
+
 def print_period_bars(klines, symbol, label, n=SHOW_N):
     """打印单个周期最近 n 根 K 线"""
     print(f"\n  ── {label} ──")
@@ -116,6 +185,7 @@ def print_all_periods(klines_map, symbol):
     header = f"\n{'='*72}\n  鸡蛋主力 ({symbol})  1/5/25分钟K线  {datetime.now().strftime('%H:%M:%S')}\n{'='*72}"
     print(header)
     print_period_bars(klines_map["25min"], symbol, "25分钟 K线")
+    print_macd_summary(klines_map["25min"])
     print_period_bars(klines_map["5min"],  symbol, "5分钟 K线")
     print_period_bars(klines_map["1min"],  symbol, "1分钟 K线")
     print()

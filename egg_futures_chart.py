@@ -101,6 +101,17 @@ def fmt_time(ns):
     return ""
 
 
+def calc_macd(klines, fast=12, slow=26, signal=9):
+    """计算 MACD：返回 (DIF, DEA, MACD柱) 三个 Series"""
+    closes = klines["close"]
+    ema12  = closes.ewm(span=fast, adjust=False).mean()
+    ema26  = closes.ewm(span=slow, adjust=False).mean()
+    dif    = ema12 - ema26
+    dea    = dif.ewm(span=signal, adjust=False).mean()
+    bar    = 2 * (dif - dea)
+    return dif, dea, bar
+
+
 def setup_api():
     global api, klines_map, SYMBOL, _last_processed
     print("正在连接天勤量化...")
@@ -186,11 +197,65 @@ def draw_one(ax, df, title):
     ax.legend(fontsize=7, loc="upper left")
 
 
+def draw_macd(ax, df):
+    """在子图上绘制 MACD 指标（DIF线、DEA线、柱状图）"""
+    ax.cla()
+
+    data = df[df["close"] > 0].tail(SHOW_N).copy()
+    if data.empty or len(data) < 26:
+        ax.set_title("MACD (12,26,9)  数据不足", fontsize=10)
+        return
+
+    x   = np.arange(len(data))
+    dif, dea, bar = calc_macd(data, fast=12, slow=26, signal=9)
+
+    # MACD 柱状图
+    for i in range(len(data)):
+        b = bar.iloc[i]
+        if pd.isna(b):
+            continue
+        color = "#e74c3c" if b >= 0 else "#26a65b"
+        ax.bar(i, b, color=color, width=0.6, linewidth=0, alpha=0.8)
+
+    # DIF 线和 DEA 线
+    dif_vals = dif.values
+    dea_vals = dea.values
+    ax.plot(x, dif_vals, color="#3498db", linewidth=1.0, label="DIF")
+    ax.plot(x, dea_vals, color="#e67e22", linewidth=1.0, label="DEA")
+
+    # 零轴
+    ax.axhline(y=0, color="var(--color-border-tertiary)", linewidth=0.5, linestyle="--")
+
+    # 标题
+    last_dif = dif.iloc[-1]
+    last_dea = dea.iloc[-1]
+    last_bar = bar.iloc[-1]
+    if not pd.isna(last_dif) and not pd.isna(last_dea):
+        bar_flag = "多头" if last_bar >= 0 else "空头"
+        ax.set_title(
+            f"MACD (12,26,9)    DIF: {last_dif:.2f}  DEA: {last_dea:.2f}  "
+            f"柱: {last_bar:.2f} ({bar_flag})",
+            fontsize=10, loc="left"
+        )
+
+    # X 轴刻度
+    step = max(1, len(data) // 8)
+    tick_pos   = x[::step]
+    times      = [fmt_time(v) for v in data["datetime"].values]
+    tick_label = [times[i] for i in range(0, len(data), step)]
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_label, fontsize=7, rotation=30)
+    ax.set_xlim(-1, len(data))
+    ax.grid(axis="y", alpha=0.25, linewidth=0.5)
+    ax.legend(fontsize=7, loc="upper left")
+
+
 def draw_all(axes):
-    """绘制全部三个周期的图表"""
+    """绘制全部四个子图：25min K线 / MACD / 5min K线 / 1min K线"""
     draw_one(axes[0], klines_map["25min"], "25分钟 K线")
-    draw_one(axes[1], klines_map["5min"],  "5分钟 K线")
-    draw_one(axes[2], klines_map["1min"],  "1分钟 K线")
+    draw_macd(axes[1], klines_map["25min"])
+    draw_one(axes[2], klines_map["5min"],  "5分钟 K线")
+    draw_one(axes[3], klines_map["1min"],  "1分钟 K线")
 
 
 def animate(frame, axes):
@@ -217,7 +282,15 @@ def animate(frame, axes):
         and api.is_changing(k1m.iloc[-1], "close")
     )
 
-    if any_new_bar or is_price_change:
+    # 25 分钟 MACD 变化（DIF/DEA 也会随最新 bar 刷新）
+    k25 = klines_map["25min"]
+    macd_change = (
+        not any_new_bar and not is_price_change
+        and len(k25) >= 26
+        and api.is_changing(k25.iloc[-1], "close")
+    )
+
+    if any_new_bar or is_price_change or macd_change:
         draw_all(axes)
         _last_draw_time = _time.time()
         return
@@ -234,8 +307,9 @@ def main():
     plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
     plt.rcParams["axes.unicode_minus"] = False
 
-    # 三行子图：25分钟 / 5分钟 / 1分钟
-    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+    # 四行子图：25min K线 / 25min MACD / 5min K线 / 1min K线
+    fig, axes = plt.subplots(4, 1, figsize=(14, 14),
+                             gridspec_kw={"height_ratios": [4, 1.5, 3, 3]})
     fig.subplots_adjust(hspace=0.35)
 
     # 全局标题
