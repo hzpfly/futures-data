@@ -37,3 +37,9 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# ── 隐私配置（真实账号密码，仅本地保留）──
+config.ini
+
+# ── WorkBuddy 内部文件 ──
+.workbuddy/

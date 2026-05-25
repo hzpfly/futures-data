@@ -13,6 +13,7 @@
 
 from tqsdk import TqApi, TqAuth
 from datetime import datetime
+from config_loader import get_tqsdk_auth
 
 
 KLINE_DUR = 60             # 1分钟 = 60秒
@@ -70,10 +71,11 @@ def print_recent_bars(klines, symbol, n=10):
 
 
 def main():
-    print("正在连接天勤量化 (账号: hzpfly)...")
+    username, password = get_tqsdk_auth()
+    print(f"正在连接天勤量化 (账号: {username})...")
 
     # ── 1. 创建 API 实例 ──
-    api = TqApi(auth=TqAuth("hzpfly", "Liang0403"))
+    api = TqApi(auth=TqAuth(username, password))
 
     # ── 2. 自动发现主力合约 ──
     symbol = discover_main_contract(api)

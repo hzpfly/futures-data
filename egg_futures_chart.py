@@ -26,6 +26,8 @@ import time
 import warnings
 warnings.filterwarnings("ignore")
 
+from config_loader import get_tqsdk_auth
+
 
 # ── 配置 ─────────────────────────────────────────────────
 DUR_SEC  = 60
@@ -54,7 +56,8 @@ def fmt_time(ns):
 def setup_api():
     global api, klines, SYMBOL
     print("正在连接天勤量化...")
-    api = TqApi(auth=TqAuth("hzpfly", "Liang0403"))
+    username, password = get_tqsdk_auth()
+    api = TqApi(auth=TqAuth(username, password))
     SYMBOL = discover_main_contract(api)
     print(f"鸡蛋主力合约: {SYMBOL}")
 
