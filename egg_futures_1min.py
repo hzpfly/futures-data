@@ -1,10 +1,8 @@
 """
-鸡蛋主力合约 1分钟K线实时监控
-自动识别当前主力合约（最近月合约），因为免费版天勤不支持 KQ.m@DCE.JD 主力连续格式
-合约: 自动从 DCE 未过期鸡蛋合约中选取最近月
-周期: 60 秒 K线
-更新: 每当最新一根 K线的 datetime 发生变化时打印（新 bar 形成）
-      同时监听 close 字段变化以实时刷新未收盘 bar 的价格
+鸡蛋主力合约 1/5/25分钟K线实时监控
+自动识别当前主力合约（持仓量最大），免费版天勤不支持 KQ.m@DCE.JD
+周期: 1分钟 / 5分钟 / 25分钟 三周期并行
+更新: 任意周期新 bar 形成时打印全部三个周期
 
 用法:
     pip install tqsdk
@@ -17,10 +15,12 @@ import time as _time
 from config_loader import get_tqsdk_auth
 
 
-KLINE_DUR   = 60           # 1分钟 = 60秒
-DATA_LEN    = 200           # 保留最近 200 根
-WAIT_SEC    = 3             # 盘后 wait_update 超时秒数
-STATUS_SLOT = 30            # 盘后状态刷新间隔（秒），避免频繁打印
+# ── 三周期配置 ──────────────────────────────────────────
+KLINE_DURS = {"1min": 60, "5min": 300, "25min": 1500}
+DATA_LEN   = 200            # 每个周期保留最近 200 根
+SHOW_N     = 8              # 打印最近 N 根
+WAIT_SEC   = 3              # 盘后 wait_update 超时秒数
+STATUS_SLOT = 30            # 盘后状态刷新间隔（秒）
 
 # DCE 鸡蛋期货交易时段（日盘，无夜盘）
 TRADING_SESSIONS = [
@@ -31,43 +31,33 @@ TRADING_SESSIONS = [
 
 
 def is_trading_time():
-    """判断当前是否在 DCE 鸡蛋期货交易时段内"""
     now = datetime.now().time()
     return any(start <= now <= end for start, end in TRADING_SESSIONS)
 
 
 def next_trading_time():
-    """返回下一个交易时段的描述"""
     now = datetime.now().time()
     for start, end in TRADING_SESSIONS:
         if now < start:
             return f"{start:%H:%M}"
-    # 今天全部收盘，明天 9:00
     return "次日 09:00"
 
 
 def discover_main_contract(api):
-    """
-    按持仓量（open_interest）确定鸡蛋主力合约。
-    TqSdk 免费版不支持 KQ.m@DCE.JD 主力连续格式，
-    因此从 DCE 未过期鸡蛋合约中选持仓量最大的。
-    """
+    """按持仓量确定鸡蛋主力合约"""
     quotes = api.query_quotes(ins_class="FUTURE", exchange_id="DCE", expired=False)
     jd_contracts = sorted([q for q in quotes if "jd" in q.lower()])
 
     if not jd_contracts:
-        return "DCE.jd2605"  # fallback
-
+        return "DCE.jd2605"
     if len(jd_contracts) == 1:
         return jd_contracts[0]
 
-    # 逐个订阅行情，拉取持仓量
     jd_quotes = {c: api.get_quote(c) for c in jd_contracts}
     deadline = _time.time() + 5
     while _time.time() < deadline:
         api.wait_update(deadline=_time.time())
 
-    # 选 open_interest 最大的
     best_code = jd_contracts[0]
     best_oi = 0
     for code in jd_contracts:
@@ -78,9 +68,8 @@ def discover_main_contract(api):
             best_code = code
 
     if best_oi == 0:
-        return jd_contracts[0]  # 全部持仓为0（极少见），fallback 最近月
+        return jd_contracts[0]
 
-    # 打印持仓排名
     print(f"  持仓最大: {best_code} ({int(best_oi)} 手)")
     others = sorted(
         [(c, getattr(jd_quotes[c], "open_interest", 0) or 0) for c in jd_contracts],
@@ -93,17 +82,14 @@ def discover_main_contract(api):
 
 
 def fmt_time(ns_datetime):
-    """将 TqSdk 的纳秒时间戳转为可读字符串"""
     if ns_datetime and ns_datetime > 0:
         return datetime.fromtimestamp(ns_datetime / 1e9).strftime("%m-%d %H:%M")
     return "---"
 
 
-def print_recent_bars(klines, symbol, n=10):
-    """打印最近 n 根 K 线"""
-    print("\n" + "=" * 72)
-    print(f"  鸡蛋主力 ({symbol})  1分钟K线   {datetime.now().strftime('%H:%M:%S')} 更新")
-    print("=" * 72)
+def print_period_bars(klines, symbol, label, n=SHOW_N):
+    """打印单个周期最近 n 根 K 线"""
+    print(f"\n  ── {label} ──")
     print(f"  {'时间':<16} {'开盘':>8} {'最高':>8} {'最低':>8} {'收盘':>8} {'成交量':>8}")
     print("  " + "-" * 70)
 
@@ -117,14 +103,21 @@ def print_recent_bars(klines, symbol, n=10):
         v = f"{int(row['volume'])}" if row["volume"] > 0 else "---"
         print(f"  {t:<16} {o:>8} {h:>8} {l:>8} {c:>8} {v:>8}")
 
-    print("=" * 72)
-
     last = klines.iloc[-1]
     if last["close"] > 0 and last["open"] > 0:
         chg     = last["close"] - last["open"]
         chg_pct = chg / last["open"] * 100
         flag    = "▲" if chg >= 0 else "▼"
-        print(f"  最新bar: {last['close']:.2f}  {flag} {abs(chg):.2f} ({abs(chg_pct):.2f}%)")
+        print(f"  → 最新: {last['close']:.2f}  {flag} {abs(chg):.2f} ({abs(chg_pct):.2f}%)")
+
+
+def print_all_periods(klines_map, symbol):
+    """打印全部三个周期"""
+    header = f"\n{'='*72}\n  鸡蛋主力 ({symbol})  1/5/25分钟K线  {datetime.now().strftime('%H:%M:%S')}\n{'='*72}"
+    print(header)
+    print_period_bars(klines_map["25min"], symbol, "25分钟 K线")
+    print_period_bars(klines_map["5min"],  symbol, "5分钟 K线")
+    print_period_bars(klines_map["1min"],  symbol, "1分钟 K线")
     print()
 
 
@@ -132,86 +125,109 @@ def main():
     username, password = get_tqsdk_auth()
     print(f"正在连接天勤量化 (账号: {username})...")
 
-    # ── 1. 创建 API 实例 ──
     api = TqApi(auth=TqAuth(username, password))
 
-    # ── 2. 自动发现主力合约 ──
+    # ── 发现主力合约 ──
     symbol = discover_main_contract(api)
-    print(f"鸡蛋主力合约: {symbol} (自动识别)")
+    print(f"鸡蛋主力合约: {symbol}")
 
-    # ── 3. 列出所有可用鸡蛋合约供参考 ──
     all_jd = sorted([q for q in api.query_quotes(
         ins_class="FUTURE", exchange_id="DCE", expired=False
     ) if "jd" in q.lower()])
     print(f"可用鸡蛋合约: {', '.join(all_jd)}")
-    print(f"K线周期: {KLINE_DUR}s  |  按 Ctrl+C 退出")
+    print(f"K线周期: 1min / 5min / 25min  |  按 Ctrl+C 退出")
 
-    # ── 4. 订阅 K 线 ──
-    klines = api.get_kline_serial(symbol, KLINE_DUR, data_length=DATA_LEN)
+    # ── 订阅三个周期 ──
+    klines_map = {}
+    for label, dur in KLINE_DURS.items():
+        klines_map[label] = api.get_kline_serial(symbol, dur, data_length=DATA_LEN)
 
-    # ── 5. 等待初始数据就绪 ──
+    # ── 等待初始数据就绪 ──
     print("正在获取初始数据...")
     deadline = _time.time() + 15
     while _time.time() < deadline:
         api.wait_update(deadline=_time.time())
-        if len(klines) > 0 and klines.iloc[-1]["close"] > 0:
+        all_ready = all(
+            len(k) > 0 and k.iloc[-1]["close"] > 0
+            for k in klines_map.values()
+        )
+        if all_ready:
             break
     else:
-        # 超时：可能盘后无数据 or 合约无交易
-        if len(klines) == 0 or klines.iloc[-1]["close"] <= 0:
-            print("\n⚠️  该合约暂无1分钟K线数据，请确认合约是否正确。")
+        # 检查哪些周期缺数据
+        missing = [label for label, k in klines_map.items()
+                   if len(k) == 0 or k.iloc[-1]["close"] <= 0]
+        if missing:
+            print(f"\n⚠️  以下周期暂无K线数据: {', '.join(missing)}")
             api.close()
             return
 
-    # ── 6. 打印初始数据 ──
+    # ── 显示初始状态 ──
     now = datetime.now()
     if is_trading_time():
-        print(f"\n🟢 交易中  (当前时段)  →  等待行情推送...\n")
+        print(f"\n🟢 交易中  →  等待行情推送...\n")
     else:
-        next_t = next_trading_time()
-        print(f"\n⏸️  盘后    (下一时段: {next_t})  →  显示最后交易数据\n")
+        print(f"\n⏸️  盘后    (下一时段: {next_trading_time()})  →  显示最后交易数据\n")
 
-    print_recent_bars(klines, symbol, n=15)
-    bar_count = 0
-    last_status_print = 0.0  # 上次打印盘后状态的时间戳
-    last_processed_dt = klines.iloc[-1]["datetime"]  # 哨兵：避免历史数据触发新bar
+    print_all_periods(klines_map, symbol)
 
-    # ── 7. 核心更新循环 ──
+    # ── 哨兵：每个周期独立跟踪已处理的 datetime ──
+    last_processed = {}
+    for label, k in klines_map.items():
+        last_processed[label] = k.iloc[-1]["datetime"]
+
+    bar_count = {"1min": 0, "5min": 0, "25min": 0}
+    last_status_print = 0.0
+
+    # ── 核心更新循环 ──
     try:
         while True:
-            # 交易时段：正常阻塞等待；盘后：超时 3 秒返回
             if is_trading_time():
                 api.wait_update()
             else:
                 api.wait_update(deadline=_time.time() + WAIT_SEC)
 
-            # 7a. 新 bar 形成（仅当 datetime 严格大于上次已处理的）
-            cur_dt = klines.iloc[-1]["datetime"]
-            if cur_dt > last_processed_dt:
-                last_processed_dt = cur_dt
-                bar_count += 1
-                print(f"[新K线 #{bar_count}] ", end="")
-                print_recent_bars(klines, symbol, n=10)
+            # 检测任意周期新 bar
+            any_new_bar = False
+            for label, klines in klines_map.items():
+                cur_dt = klines.iloc[-1]["datetime"]
+                if cur_dt > last_processed[label]:
+                    last_processed[label] = cur_dt
+                    bar_count[label] += 1
+                    any_new_bar = True
 
-            # 7b. 当前 bar 价格实时更新（仅交易时段 + 当前最新bar）
-            elif is_trading_time() and cur_dt == last_processed_dt \
-                    and api.is_changing(klines.iloc[-1], "close"):
-                last = klines.iloc[-1]
-                t    = fmt_time(last["datetime"])
-                print(f"\r  实时 {t}  O:{last['open']:.2f}  H:{last['high']:.2f}"
-                      f"  L:{last['low']:.2f}  C:{last['close']:.2f}"
-                      f"  V:{int(last['volume'])}    ", end="", flush=True)
+            if any_new_bar:
+                bar_info = ", ".join(
+                    f"{label}#{bar_count[label]}"
+                    for label in KLINE_DURS
+                )
+                print(f"[{bar_info}] ", end="")
+                print_all_periods(klines_map, symbol)
 
-            # 7c. 盘后：定期打印状态（避免刷屏）
+            # 仅 1 分钟做实时 close 刷新
+            elif is_trading_time():
+                k1m = klines_map["1min"]
+                cur_dt_1m = k1m.iloc[-1]["datetime"]
+                if cur_dt_1m == last_processed["1min"] \
+                        and api.is_changing(k1m.iloc[-1], "close"):
+                    last = k1m.iloc[-1]
+                    t = fmt_time(last["datetime"])
+                    print(f"\r  1min实时 {t}  O:{last['open']:.2f}  H:{last['high']:.2f}"
+                          f"  L:{last['low']:.2f}  C:{last['close']:.2f}"
+                          f"  V:{int(last['volume'])}    ", end="", flush=True)
+
+            # 盘后定期状态
             elif not is_trading_time():
                 if _time.time() - last_status_print > STATUS_SLOT:
                     last_status_print = _time.time()
                     next_t = next_trading_time()
-                    last_bar = klines.iloc[-1]
-                    bt = fmt_time(last_bar["datetime"])
-                    print(f"\r  ⏸️  盘后 | 最后K线: {bt}  "
-                          f"C:{last_bar['close']:.2f}  V:{int(last_bar['volume'])}  "
-                          f"| 等待 {next_t} 开盘...     ", end="", flush=True)
+                    parts = []
+                    for label, k in klines_map.items():
+                        lb = k.iloc[-1]
+                        bt = fmt_time(lb["datetime"])
+                        parts.append(f"{label}:{bt} C:{lb['close']:.0f}")
+                    print(f"\r  ⏸️  盘后 | {' | '.join(parts)}  | 等待 {next_t}...     ",
+                          end="", flush=True)
 
     except KeyboardInterrupt:
         print("\n\n已退出。")

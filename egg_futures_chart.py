@@ -1,13 +1,8 @@
 """
-鸡蛋主力合约 1分钟K线 图形监控
-自动识别当前主力合约（最近月合约），免费版天勤不支持 KQ.m@DCE.JD
-周期: 60 秒 K线
-
-更新规则（严格按 TqSdk 文档）:
-  - get_kline_serial 只调用一次，循环中复用同一 DataFrame 引用
-  - 用 api.is_changing(klines.iloc[-1], "datetime") 检测新 bar 形成
-  - 用 api.is_changing(klines.iloc[-1], "close") 检测当前 bar 实时刷新
-  - 不使用 sleep()，不在循环里重新调用 get_*
+鸡蛋主力合约 1/5/25分钟K线 图形监控
+自动识别当前主力合约（持仓量最大），免费版天勤不支持 KQ.m@DCE.JD
+周期: 1分钟 / 5分钟 / 25分钟 三周期并行
+显示: 从上到下 25分钟 / 5分钟 / 1分钟 三行蜡烛图
 
 用法:
     pip install tqsdk matplotlib
@@ -29,11 +24,11 @@ from config_loader import get_tqsdk_auth
 import time as _time
 
 
-# ── 配置 ─────────────────────────────────────────────────
-DUR_SEC  = 60
-DATA_LEN = 200
-SHOW_N   = 60       # 图上显示最近 60 根 K 线
-VIEW_SEC = 60       # 盘后重绘间隔（秒），不频繁刷新
+# ── 三周期配置 ──────────────────────────────────────────
+KLINE_DURS = {"1min": 60, "5min": 300, "25min": 1500}
+DATA_LEN   = 200
+SHOW_N     = 60         # 图上显示最近 60 根
+VIEW_SEC   = 60         # 盘后重绘间隔（秒）
 
 # DCE 鸡蛋期货交易时段（日盘，无夜盘）
 TRADING_SESSIONS = [
@@ -42,21 +37,19 @@ TRADING_SESSIONS = [
     (time(13, 30), time(15, 0)),
 ]
 
-api    = None
-klines = None
-SYMBOL = None
-_last_draw_time = 0.0  # 上次重绘时间
-_last_processed_dt = 0  # 哨兵：已处理的最新 bar datetime
+api      = None
+SYMBOL   = None
+klines_map = {}           # {"1min": df, "5min": df, "25min": df}
+_last_processed = {}      # 每个周期的哨兵 datetime
+_last_draw_time = 0.0     # 上次重绘时间
 
 
 def is_trading_time():
-    """判断当前是否在 DCE 鸡蛋期货交易时段内"""
     now = datetime.now().time()
     return any(start <= now <= end for start, end in TRADING_SESSIONS)
 
 
 def next_trading_time():
-    """返回下一个交易时段的描述"""
     now = datetime.now().time()
     for start, end in TRADING_SESSIONS:
         if now < start:
@@ -65,11 +58,7 @@ def next_trading_time():
 
 
 def discover_main_contract(api):
-    """
-    按持仓量（open_interest）确定鸡蛋主力合约。
-    TqSdk 免费版不支持 KQ.m@DCE.JD 主力连续格式，
-    因此从 DCE 未过期鸡蛋合约中选持仓量最大的。
-    """
+    """按持仓量确定鸡蛋主力合约"""
     quotes = api.query_quotes(ins_class="FUTURE", exchange_id="DCE", expired=False)
     jd_contracts = sorted([q for q in quotes if "jd" in q.lower()])
 
@@ -113,7 +102,7 @@ def fmt_time(ns):
 
 
 def setup_api():
-    global api, klines, SYMBOL
+    global api, klines_map, SYMBOL, _last_processed
     print("正在连接天勤量化...")
     username, password = get_tqsdk_auth()
     api = TqApi(auth=TqAuth(username, password))
@@ -125,97 +114,117 @@ def setup_api():
     ) if "jd" in q.lower()])
     print(f"可用合约: {', '.join(all_jd)}")
 
-    klines = api.get_kline_serial(SYMBOL, DUR_SEC, data_length=DATA_LEN)
+    # 订阅三个周期
+    for label, dur in KLINE_DURS.items():
+        klines_map[label] = api.get_kline_serial(SYMBOL, dur, data_length=DATA_LEN)
+
+    # 等待初始数据
+    deadline = _time.time() + 15
+    while _time.time() < deadline:
+        api.wait_update(deadline=_time.time())
+        all_ready = all(
+            len(k) > 0 and k.iloc[-1]["close"] > 0
+            for k in klines_map.values()
+        )
+        if all_ready:
+            break
+
+    # 初始化哨兵
+    for label, k in klines_map.items():
+        _last_processed[label] = k.iloc[-1]["datetime"]
+
     print("连接成功，等待行情推送...")
 
 
-def draw(ax_k, ax_v, df):
-    """绘制蜡烛图 + MA + 成交量"""
-    ax_k.cla()
-    ax_v.cla()
+def draw_one(ax, df, title):
+    """在单个子图上绘制蜡烛图 + MA"""
+    ax.cla()
 
     data = df[df["close"] > 0].tail(SHOW_N).copy()
     if data.empty:
+        ax.set_title(f"{title}  (无数据)", fontsize=10)
         return
 
     x     = np.arange(len(data))
     times = [fmt_time(v) for v in data["datetime"].values]
 
+    # 蜡烛图
     for i, (_, r) in enumerate(data.iterrows()):
         color = "#e74c3c" if r["close"] >= r["open"] else "#26a65b"
         lo    = min(r["open"], r["close"])
         hi    = max(r["open"], r["close"])
-        ax_k.bar(i, hi - lo, bottom=lo,   color=color, width=0.6, linewidth=0)
-        ax_k.plot([i, i], [r["low"], r["high"]], color=color, linewidth=0.8)
+        ax.bar(i, hi - lo, bottom=lo, color=color, width=0.6, linewidth=0)
+        ax.plot([i, i], [r["low"], r["high"]], color=color, linewidth=0.8)
 
+    # MAs
     closes = data["close"].values
     for n, c in [(5, "#f39c12"), (10, "#3498db"), (20, "#9b59b6")]:
         if len(closes) >= n:
             ma = pd.Series(closes).rolling(n).mean().values
-            ax_k.plot(x, ma, color=c, linewidth=1, label=f"MA{n}")
+            ax.plot(x, ma, color=c, linewidth=0.8, label=f"MA{n}")
 
-    for i, (_, r) in enumerate(data.iterrows()):
-        color = "#e74c3c" if r["close"] >= r["open"] else "#26a65b"
-        ax_v.bar(i, r["volume"], color=color, width=0.6, alpha=0.7, linewidth=0)
-
+    # 标题 + 最新价
     last    = data.iloc[-1]
     chg     = last["close"] - data.iloc[0]["open"]
-    chg_pct = chg / data.iloc[0]["open"] * 100
+    chg_pct = chg / data.iloc[0]["open"] * 100 if data.iloc[0]["open"] != 0 else 0
     flag    = "▲" if chg >= 0 else "▼"
 
-    # 交易状态标记
-    if is_trading_time():
-        status = "🟢 交易中"
-    else:
-        status = f"⏸️  盘后 (等 {next_trading_time()})"
-
-    ax_k.set_title(
-        f"\u9e21\u86cb\u4e3b\u529b ({SYMBOL})  1\u5206\u949fK\u7ebf  {status}\n"
-        f"\u6700\u65b0: {last['close']:.2f}  {flag} {abs(chg):.2f} ({abs(chg_pct):.2f}%)"
-        f"   \u66f4\u65b0: {datetime.now().strftime('%H:%M:%S')}",
+    ax.set_title(
+        f"{title}    最新: {last['close']:.2f}  {flag} {abs(chg):.2f} ({abs(chg_pct):.2f}%)",
         fontsize=10, loc="left"
     )
 
-    tick_pos   = x[::5]
-    tick_label = [times[i] for i in range(0, len(data), 5)]
-    for ax in (ax_k, ax_v):
-        ax.set_xticks(tick_pos)
-        ax.set_xticklabels(tick_label, fontsize=7, rotation=30)
-        ax.set_xlim(-1, len(data))
-        ax.grid(axis="y", alpha=0.25, linewidth=0.5)
-
-    ax_k.tick_params(labelbottom=False)
-    ax_k.set_ylabel("价格", fontsize=9)
-    ax_v.set_ylabel("成交量", fontsize=9)
-    ax_k.legend(fontsize=8, loc="upper left")
+    # X 轴刻度
+    step = max(1, len(data) // 8)
+    tick_pos   = x[::step]
+    tick_label = [times[i] for i in range(0, len(data), step)]
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_label, fontsize=7, rotation=30)
+    ax.set_xlim(-1, len(data))
+    ax.grid(axis="y", alpha=0.25, linewidth=0.5)
+    ax.set_ylabel("价格", fontsize=8)
+    ax.legend(fontsize=7, loc="upper left")
 
 
-def animate(frame, ax_k, ax_v):
-    global api, klines, _last_draw_time, _last_processed_dt
-    if api is None or klines is None:
+def draw_all(axes):
+    """绘制全部三个周期的图表"""
+    draw_one(axes[0], klines_map["25min"], "25分钟 K线")
+    draw_one(axes[1], klines_map["5min"],  "5分钟 K线")
+    draw_one(axes[2], klines_map["1min"],  "1分钟 K线")
+
+
+def animate(frame, axes):
+    global api, klines_map, _last_draw_time, _last_processed
+    if api is None or not klines_map:
         return
 
-    # 非阻塞轮询（deadline=当前时间，即不等待直接返回）
     api.wait_update(deadline=_time.time())
 
-    cur_dt = klines.iloc[-1]["datetime"]
+    # 检测任意周期新 bar
+    any_new_bar = False
+    for label, k in klines_map.items():
+        cur_dt = k.iloc[-1]["datetime"]
+        if cur_dt > _last_processed[label]:
+            _last_processed[label] = cur_dt
+            any_new_bar = True
 
-    # 新 bar 或当前 bar 价格变化时立即重绘（哨兵：避免历史数据误触发）
-    is_new_bar = cur_dt > _last_processed_dt
-    is_price_change = (cur_dt == _last_processed_dt and
-                       api.is_changing(klines.iloc[-1], "close"))
+    # 1 分钟实时价格变化
+    k1m = klines_map["1min"]
+    is_price_change = (
+        not any_new_bar
+        and is_trading_time()
+        and k1m.iloc[-1]["datetime"] == _last_processed["1min"]
+        and api.is_changing(k1m.iloc[-1], "close")
+    )
 
-    if is_new_bar:
-        _last_processed_dt = cur_dt
-
-    if is_new_bar or is_price_change:
-        draw(ax_k, ax_v, klines.copy())
+    if any_new_bar or is_price_change:
+        draw_all(axes)
         _last_draw_time = _time.time()
         return
 
-    # 盘后：降低重绘频率（仅在标题状态文字变化时刷新）
+    # 盘后定期刷新
     if not is_trading_time() and _time.time() - _last_draw_time > VIEW_SEC:
-        draw(ax_k, ax_v, klines.copy())
+        draw_all(axes)
         _last_draw_time = _time.time()
 
 
@@ -225,19 +234,26 @@ def main():
     plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
     plt.rcParams["axes.unicode_minus"] = False
 
-    fig, (ax_k, ax_v) = plt.subplots(
-        2, 1, figsize=(14, 8),
-        gridspec_kw={"height_ratios": [3, 1]}
-    )
-    fig.subplots_adjust(hspace=0.05)
-    fig.suptitle("天勤量化 — 鸡蛋期货 1分钟 实时K线", fontsize=12)
+    # 三行子图：25分钟 / 5分钟 / 1分钟
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+    fig.subplots_adjust(hspace=0.35)
 
-    draw(ax_k, ax_v, klines.copy())
+    # 全局标题
+    if is_trading_time():
+        status = "🟢 交易中"
+    else:
+        status = f"⏸️  盘后 (等 {next_trading_time()})"
+    fig.suptitle(
+        f"天勤量化 — 鸡蛋期货 ({SYMBOL})  1/5/25分钟K线  {status}    "
+        f"{datetime.now().strftime('%H:%M:%S')}",
+        fontsize=12
+    )
+
+    draw_all(axes)
 
     ani = animation.FuncAnimation(
-        fig,
-        animate,
-        fargs=(ax_k, ax_v),
+        fig, animate,
+        fargs=(axes,),
         interval=2000,
         cache_frame_data=False
     )
