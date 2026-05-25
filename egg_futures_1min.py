@@ -12,12 +12,38 @@
 """
 
 from tqsdk import TqApi, TqAuth
-from datetime import datetime
+from datetime import datetime, time
+import time as _time
 from config_loader import get_tqsdk_auth
 
 
-KLINE_DUR = 60             # 1分钟 = 60秒
-DATA_LEN  = 200            # 保留最近 200 根
+KLINE_DUR   = 60           # 1分钟 = 60秒
+DATA_LEN    = 200           # 保留最近 200 根
+WAIT_SEC    = 3             # 盘后 wait_update 超时秒数
+STATUS_SLOT = 30            # 盘后状态刷新间隔（秒），避免频繁打印
+
+# DCE 鸡蛋期货交易时段（日盘，无夜盘）
+TRADING_SESSIONS = [
+    (time(9, 0),  time(10, 15)),
+    (time(10, 30), time(11, 30)),
+    (time(13, 30), time(15, 0)),
+]
+
+
+def is_trading_time():
+    """判断当前是否在 DCE 鸡蛋期货交易时段内"""
+    now = datetime.now().time()
+    return any(start <= now <= end for start, end in TRADING_SESSIONS)
+
+
+def next_trading_time():
+    """返回下一个交易时段的描述"""
+    now = datetime.now().time()
+    for start, end in TRADING_SESSIONS:
+        if now < start:
+            return f"{start:%H:%M}"
+    # 今天全部收盘，明天 9:00
+    return "次日 09:00"
 
 
 def discover_main_contract(api):
@@ -86,32 +112,74 @@ def main():
         ins_class="FUTURE", exchange_id="DCE", expired=False
     ) if "jd" in q.lower()])
     print(f"可用鸡蛋合约: {', '.join(all_jd)}")
-    print(f"K线周期: {KLINE_DUR}s  |  按 Ctrl+C 退出\n")
+    print(f"K线周期: {KLINE_DUR}s  |  按 Ctrl+C 退出")
 
+    # ── 4. 订阅 K 线 ──
+    klines = api.get_kline_serial(symbol, KLINE_DUR, data_length=DATA_LEN)
+
+    # ── 5. 等待初始数据就绪 ──
+    print("正在获取初始数据...")
+    deadline = _time.time() + 15
+    while _time.time() < deadline:
+        api.wait_update(deadline=_time.time())
+        if len(klines) > 0 and klines.iloc[-1]["close"] > 0:
+            break
+    else:
+        # 超时：可能盘后无数据 or 合约无交易
+        if len(klines) == 0 or klines.iloc[-1]["close"] <= 0:
+            print("\n⚠️  该合约暂无1分钟K线数据，请确认合约是否正确。")
+            api.close()
+            return
+
+    # ── 6. 打印初始数据 ──
+    now = datetime.now()
+    if is_trading_time():
+        print(f"\n🟢 交易中  (当前时段)  →  等待行情推送...\n")
+    else:
+        next_t = next_trading_time()
+        print(f"\n⏸️  盘后    (下一时段: {next_t})  →  显示最后交易数据\n")
+
+    print_recent_bars(klines, symbol, n=15)
+    bar_count = 0
+    last_status_print = 0.0  # 上次打印盘后状态的时间戳
+    last_processed_dt = klines.iloc[-1]["datetime"]  # 哨兵：避免历史数据触发新bar
+
+    # ── 7. 核心更新循环 ──
     try:
-        # ── 4. 订阅 K 线序列（get_* 只调用一次）──
-        klines = api.get_kline_serial(symbol, KLINE_DUR, data_length=DATA_LEN)
-
-        print("连接成功，等待行情推送...\n")
-        bar_count = 0
-
-        # ── 5. 核心更新循环 ──
         while True:
-            api.wait_update()
+            # 交易时段：正常阻塞等待；盘后：超时 3 秒返回
+            if is_trading_time():
+                api.wait_update()
+            else:
+                api.wait_update(deadline=_time.time() + WAIT_SEC)
 
-            # 5a. 新 bar 形成
-            if api.is_changing(klines.iloc[-1], "datetime"):
+            # 7a. 新 bar 形成（仅当 datetime 严格大于上次已处理的）
+            cur_dt = klines.iloc[-1]["datetime"]
+            if cur_dt > last_processed_dt:
+                last_processed_dt = cur_dt
                 bar_count += 1
                 print(f"[新K线 #{bar_count}] ", end="")
                 print_recent_bars(klines, symbol, n=10)
 
-            # 5b. 当前 bar 价格实时更新
-            elif api.is_changing(klines.iloc[-1], "close"):
+            # 7b. 当前 bar 价格实时更新（仅交易时段 + 当前最新bar）
+            elif is_trading_time() and cur_dt == last_processed_dt \
+                    and api.is_changing(klines.iloc[-1], "close"):
                 last = klines.iloc[-1]
                 t    = fmt_time(last["datetime"])
                 print(f"\r  实时 {t}  O:{last['open']:.2f}  H:{last['high']:.2f}"
                       f"  L:{last['low']:.2f}  C:{last['close']:.2f}"
                       f"  V:{int(last['volume'])}    ", end="", flush=True)
+
+            # 7c. 盘后：定期打印状态（避免刷屏）
+            elif not is_trading_time():
+                if _time.time() - last_status_print > STATUS_SLOT:
+                    last_status_print = _time.time()
+                    next_t = next_trading_time()
+                    last_bar = klines.iloc[-1]
+                    bt = fmt_time(last_bar["datetime"])
+                    print(f"\r  ⏸️  盘后 | 最后K线: {bt}  "
+                          f"C:{last_bar['close']:.2f}  V:{int(last_bar['volume'])}  "
+                          f"| 等待 {next_t} 开盘...     ", end="", flush=True)
 
     except KeyboardInterrupt:
         print("\n\n已退出。")

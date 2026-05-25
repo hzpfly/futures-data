@@ -21,22 +21,47 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import time
+from datetime import datetime, time
 import warnings
 warnings.filterwarnings("ignore")
 
 from config_loader import get_tqsdk_auth
+import time as _time
 
 
 # ── 配置 ─────────────────────────────────────────────────
 DUR_SEC  = 60
 DATA_LEN = 200
 SHOW_N   = 60       # 图上显示最近 60 根 K 线
+VIEW_SEC = 60       # 盘后重绘间隔（秒），不频繁刷新
+
+# DCE 鸡蛋期货交易时段（日盘，无夜盘）
+TRADING_SESSIONS = [
+    (time(9, 0),  time(10, 15)),
+    (time(10, 30), time(11, 30)),
+    (time(13, 30), time(15, 0)),
+]
 
 api    = None
 klines = None
 SYMBOL = None
+_last_draw_time = 0.0  # 上次重绘时间
+_last_processed_dt = 0  # 哨兵：已处理的最新 bar datetime
+
+
+def is_trading_time():
+    """判断当前是否在 DCE 鸡蛋期货交易时段内"""
+    now = datetime.now().time()
+    return any(start <= now <= end for start, end in TRADING_SESSIONS)
+
+
+def next_trading_time():
+    """返回下一个交易时段的描述"""
+    now = datetime.now().time()
+    for start, end in TRADING_SESSIONS:
+        if now < start:
+            return f"{start:%H:%M}"
+    return "次日 09:00"
 
 
 def discover_main_contract(api):
@@ -104,8 +129,14 @@ def draw(ax_k, ax_v, df):
     chg_pct = chg / data.iloc[0]["open"] * 100
     flag    = "▲" if chg >= 0 else "▼"
 
+    # 交易状态标记
+    if is_trading_time():
+        status = "🟢 交易中"
+    else:
+        status = f"⏸️  盘后 (等 {next_trading_time()})"
+
     ax_k.set_title(
-        f"\u9e21\u86cb\u4e3b\u529b ({SYMBOL})  1\u5206\u949fK\u7ebf\n"
+        f"\u9e21\u86cb\u4e3b\u529b ({SYMBOL})  1\u5206\u949fK\u7ebf  {status}\n"
         f"\u6700\u65b0: {last['close']:.2f}  {flag} {abs(chg):.2f} ({abs(chg_pct):.2f}%)"
         f"   \u66f4\u65b0: {datetime.now().strftime('%H:%M:%S')}",
         fontsize=10, loc="left"
@@ -126,17 +157,32 @@ def draw(ax_k, ax_v, df):
 
 
 def animate(frame, ax_k, ax_v):
-    global api, klines
+    global api, klines, _last_draw_time, _last_processed_dt
     if api is None or klines is None:
         return
 
-    # 非阻塞轮询（deadline=0），不阻塞 matplotlib 事件循环
-    api.wait_update(deadline=time.time())
+    # 非阻塞轮询（deadline=当前时间，即不等待直接返回）
+    api.wait_update(deadline=_time.time())
 
-    # 新 bar 或当前 bar 价格变化时重绘
-    if api.is_changing(klines.iloc[-1], "datetime") or \
-       api.is_changing(klines.iloc[-1], "close"):
+    cur_dt = klines.iloc[-1]["datetime"]
+
+    # 新 bar 或当前 bar 价格变化时立即重绘（哨兵：避免历史数据误触发）
+    is_new_bar = cur_dt > _last_processed_dt
+    is_price_change = (cur_dt == _last_processed_dt and
+                       api.is_changing(klines.iloc[-1], "close"))
+
+    if is_new_bar:
+        _last_processed_dt = cur_dt
+
+    if is_new_bar or is_price_change:
         draw(ax_k, ax_v, klines.copy())
+        _last_draw_time = _time.time()
+        return
+
+    # 盘后：降低重绘频率（仅在标题状态文字变化时刷新）
+    if not is_trading_time() and _time.time() - _last_draw_time > VIEW_SEC:
+        draw(ax_k, ax_v, klines.copy())
+        _last_draw_time = _time.time()
 
 
 def main():
