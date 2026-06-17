@@ -224,7 +224,7 @@ def draw_macd(ax, df):
     ax.plot(x, dea_vals, color="#e67e22", linewidth=1.0, label="DEA")
 
     # 零轴
-    ax.axhline(y=0, color="var(--color-border-tertiary)", linewidth=0.5, linestyle="--")
+    ax.axhline(y=0, color="#888888", linewidth=0.5, linestyle="--")
 
     # 标题
     last_dif = dif.iloc[-1]
