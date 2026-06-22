@@ -11,7 +11,7 @@ echo.
 echo Select mode:
 echo   [1] Terminal mode   (egg_futures_1min.py)
 echo   [2] Chart mode      (egg_futures_chart.py)
-echo   [3] EIS signal monitor  (eis_monitor.py)
+echo   [3] EIS monitor     (eis_monitor.py, 25min + daily)
 echo.
 set /p choice=Enter 1, 2 or 3:
 if "%choice%"=="2" (

@@ -1,8 +1,9 @@
 """
-EIS 实时信号监控
-=================
-盘中监控 CF609 与 JD 主力合约的 25 分钟 EIS 信号 (Elder Impulse System)。
-信号变化时弹出 Windows 桌面通知 + 控制台响铃 + 详细日志。
+EIS 实时信号监控（双周期）
+=========================
+盘中同时监控 CF609 与 JD 主力合约的 **25 分钟 + 日线** 双周期 EIS 信号
+(Elder Impulse System)。
+任意周期颜色变化时弹出 Windows 桌面通知 + 控制台响铃 + 详细日志。
 
 EIS 信号规则:
   GREEN  : EMA(13)↑ AND MACD柱↑ → 多头加速，只允许买入
@@ -16,12 +17,17 @@ EIS 信号规则:
   🔴→🔵 红变蓝 : 空头动量衰竭 → 立即平空仓 (快速退出)
   🟢→🔴 / 🔴→🟢 : 极端反转
 
+双周期设计:
+  - 25min 信号 = 日内交易时机（每 25min 可能变化）
+  - 日线 信号 = 中线方向变化（每日 15:00 收盘后确认）
+  - 两个周期独立跟踪、独立通知，互不干扰
+
 设计要点:
   - 基于已收盘 K 线计算 EIS，避免未收盘 K 线噪音
   - 交易时段内：用倒数第二根 (iloc[-2]) 作为已收盘 K 线
   - 盘后时段：用最后一根 (iloc[-1]) 作为已收盘 K 线
   - 每 10 秒检测一次，新 K 线收盘时必检
-  - 同一颜色变化只通知一次，避免重复
+  - 同一 (合约,周期,from,to) 5 分钟内不重复通知
 
 用法:
     python eis_monitor.py
@@ -41,11 +47,18 @@ from weekly_eis import determine_eis_color
 
 
 # ── 配置 ──────────────────────────────────────────────────
-KLINE_DUR  = 1500       # 25 分钟
+PERIOD_25M_DUR = 1500       # 25 分钟
+PERIOD_DAILY_DUR = 86400    # 日线
 DATA_LEN   = 200
-SCAN_SEC   = 10         # 主循环 wait_update 超时
-STATUS_SEC = 60         # 状态行刷新间隔
-ALERT_COOLDOWN = 300    # 同一合约同一信号 5 分钟内不重复通知
+SCAN_SEC   = 10             # 主循环 wait_update 超时
+STATUS_SEC = 60             # 状态行刷新间隔
+ALERT_COOLDOWN = 300        # 同一(合约,周期,from,to) 5 分钟内不重复通知
+
+# 监控周期列表：每条 = (key, label, kline_seconds, 通知标签)
+PERIODS = [
+    ("25min", "25分钟", PERIOD_25M_DUR,   "日内时机"),
+    ("daily", "日线",   PERIOD_DAILY_DUR, "中线方向"),
+]
 
 # 日盘交易时段 (鸡蛋只有日盘；棉花有夜盘但这里仅监控日盘)
 TRADING_SESSIONS = [
@@ -68,8 +81,8 @@ SIGNAL_MEANING = {
 
 
 # ── 全局状态 ───────────────────────────────────────────────
-_event_log = []           # [(time, symbol, name, from, to, eis)]
-_last_alert_time = {}     # {(symbol, from, to): timestamp} - 冷却期
+_event_log = []           # [(time, symbol, period, name, from, to, eis)]
+_last_alert_time = {}     # {(symbol, period, from, to): timestamp} - 冷却期
 
 
 # ── 工具函数 ───────────────────────────────────────────────
@@ -146,12 +159,13 @@ def play_alert_sound():
         pass
 
 
-def fire_signal(sym, name, old_color, new_color, eis):
-    """触发信号：写日志 + 弹通知 + 响铃"""
+def fire_signal(sym, name, period_label, old_color, new_color, eis):
+    """触发信号：写日志 + 弹通知 + 响铃。
+    period_label: "25分钟" / "日线"，用于通知标题"""
     now_str = datetime.now().strftime("%H:%M:%S")
 
-    # 冷却期检查：同一 (symbol, from, to) 5 分钟内不重复
-    key = (sym, old_color, new_color)
+    # 冷却期检查：同一 (symbol, period, from, to) 5 分钟内不重复
+    key = (sym, period_label, old_color, new_color)
     now_ts = _time.time()
     if key in _last_alert_time and now_ts - _last_alert_time[key] < ALERT_COOLDOWN:
         return False
@@ -164,9 +178,10 @@ def fire_signal(sym, name, old_color, new_color, eis):
 
     # ── 控制台详细日志 ──
     print(f"\n{'='*64}")
-    print(f"  ⚠️  EIS 信号触发 | {now_str}")
+    print(f"  ⚠️  EIS 信号触发 | {now_str}  [{period_label}]")
     print(f"  {'='*64}")
     print(f"  合约: {name} ({sym})")
+    print(f"  周期: {period_label}")
     print(f"  变化: {COLOR_EMOJI[old_color]} {old_color}  →  {COLOR_EMOJI[new_color]} {new_color}")
     print(f"  操作: {meaning}")
     print(f"  {'─'*60}")
@@ -179,9 +194,9 @@ def fire_signal(sym, name, old_color, new_color, eis):
     print(f"  K线时间   : {eis['last_time']}")
     print(f"  {'='*64}\n", flush=True)
 
-    # ── Windows Toast 通知 ──
+    # ── Windows Toast 通知（标题含周期标签）──
     notify_windows(
-        f"EIS 信号: {name}",
+        f"EIS {period_label}信号: {name}",
         f"{meaning}\n价格: {eis['last_close']:.0f}  时间: {now_str}"
     )
 
@@ -192,6 +207,7 @@ def fire_signal(sym, name, old_color, new_color, eis):
     _event_log.append({
         "time": now_str,
         "symbol": sym,
+        "period": period_label,
         "name": name,
         "from": old_color,
         "to": new_color,
@@ -203,16 +219,18 @@ def fire_signal(sym, name, old_color, new_color, eis):
 
 
 def print_status(state):
-    """打印当前状态快照"""
+    """打印当前状态快照（双周期表格）"""
     trading = is_trading_time()
     status_str = "🟢 交易时段" if trading else f"⏸ 非交易时段 (下次: {next_trading_time()})"
     print(f"\n  [{datetime.now().strftime('%H:%M:%S')}] {status_str}")
     print(f"  {'─'*60}")
-    for sym, s in state.items():
+    print(f"  {'合约':<20} {'周期':<8} {'颜色':<6} {'价格':>8}  {'EMA(13)':>10}  {'MACD柱':>10}")
+    for (sym, period_key), s in state.items():
         eis = s["last_eis"]
         ce = COLOR_EMOJI.get(eis["color"], "⬜")
-        print(f"  {ce} {s['name']:<20} {sym:<20} "
-              f"颜色: {eis['color']:<6} 价格: {eis['last_close']:.0f}")
+        period_label = next(p[1] for p in PERIODS if p[0] == period_key)
+        print(f"  {s['name']:<20} {period_label:<8} {ce} {eis['color']:<5} "
+              f"{eis['last_close']:>8.0f}  {eis['ema_cur']:>10.2f}  {eis['hist_cur']:>10.2f}")
     print(f"  {'─'*60}", flush=True)
 
 
@@ -227,63 +245,66 @@ def main():
         jd_symbol = discover_main_contract(api)
         print(f"  JD 主力: {jd_symbol}")
 
-        # ── 监控列表 ──
+        # ── 监控合约列表 ──
         watchlist = [
             ("CZCE.CF609", "CF609 棉花"),
             (jd_symbol,    f"{jd_symbol.split('.')[-1].upper()} 鸡蛋主力"),
         ]
 
-        # ── 订阅 25min K 线 ──
+        # ── 订阅每个合约的双周期 K 线 ──
+        # state key = (sym, period_key)
         state = {}
         for sym, name in watchlist:
-            k25 = api.get_kline_serial(sym, KLINE_DUR, data_length=DATA_LEN)
-            state[sym] = {
-                "name": name,
-                "klines": k25,
-                "color": None,        # 已确认的上一颜色
-                "last_dt": 0,         # 上次处理的已收盘 K 线时间
-                "last_eis": {"color": "BLUE", "last_close": 0,
-                             "ema_cur": 0, "ema_slope": "FLAT",
-                             "hist_cur": 0, "hist_slope": "FLAT",
-                             "dif": 0, "dea": 0,
-                             "ema_prev": 0, "hist_prev": 0,
-                             "last_time": ""},
-            }
+            for period_key, period_label, dur, _ in PERIODS:
+                k = api.get_kline_serial(sym, dur, data_length=DATA_LEN)
+                state[(sym, period_key)] = {
+                    "name": name,
+                    "period_label": period_label,
+                    "klines": k,
+                    "color": None,
+                    "last_dt": 0,
+                    "last_eis": {"color": "BLUE", "last_close": 0,
+                                 "ema_cur": 0, "ema_slope": "FLAT",
+                                 "hist_cur": 0, "hist_slope": "FLAT",
+                                 "dif": 0, "dea": 0,
+                                 "ema_prev": 0, "hist_prev": 0,
+                                 "last_time": ""},
+                }
 
         # ── 等待数据加载 ──
         print("  等待数据加载...")
-        deadline = _time.time() + 15
+        deadline = _time.time() + 20
         while _time.time() < deadline:
             api.wait_update(deadline=_time.time())
             if all(s["klines"].iloc[-1]["close"] > 0 for s in state.values()):
                 break
 
         # ── 初始化 EIS 颜色 ──
-        for sym, name in watchlist:
-            eis = get_closed_bar_eis(state[sym]["klines"], name)
-            state[sym]["color"]     = eis["color"]
-            state[sym]["last_eis"]  = eis
-            # 记录已收盘 K 线的 datetime
-            valid = state[sym]["klines"][state[sym]["klines"]["close"] > 0]
+        for (sym, period_key), s in state.items():
+            eis = get_closed_bar_eis(s["klines"], s["name"])
+            s["color"]     = eis["color"]
+            s["last_eis"]  = eis
+            valid = s["klines"][s["klines"]["close"] > 0]
             if is_trading_time() and len(valid) > 1:
-                state[sym]["last_dt"] = valid.iloc[-2]["datetime"]
+                s["last_dt"] = valid.iloc[-2]["datetime"]
             else:
-                state[sym]["last_dt"] = valid.iloc[-1]["datetime"]
+                s["last_dt"] = valid.iloc[-1]["datetime"]
 
         # ── 启动横幅 ──
         print(f"\n{'='*64}")
         print(f"  EIS 实时信号监控启动 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  双周期: 25分钟(日内时机) + 日线(中线方向)")
         print(f"{'='*64}")
-        print(f"  监控品种:")
-        for sym, s in state.items():
+        print(f"  监控品种 × 周期:")
+        for (sym, period_key), s in state.items():
             ce = COLOR_EMOJI[s["last_eis"]["color"]]
-            print(f"    {ce} {s['name']:<20} {sym}")
+            print(f"    {ce} {s['name']:<20} {s['period_label']:<6} {sym}")
         print(f"\n  信号触发时机:")
         for (f, t), m in SIGNAL_MEANING.items():
-            print(f"    {COLOR_EMOJI[f]}→{COLOR_EMOJI[t]}  {m}")
+            print(f"    {m}")
         print(f"\n  交易时段: 09:00-10:15, 10:30-11:30, 13:30-15:00")
         print(f"  通知方式: Windows 桌面 Toast + 控制台响铃")
-        print(f"  冷却期  : 同一信号 {ALERT_COOLDOWN} 秒内不重复")
+        print(f"  冷却期  : 同一(合约,周期,from,to) {ALERT_COOLDOWN} 秒内不重复")
         print(f"  按 Ctrl+C 退出监控")
         print(f"{'='*64}\n", flush=True)
 
@@ -295,9 +316,8 @@ def main():
         while True:
             api.wait_update(deadline=_time.time() + SCAN_SEC)
 
-            # 检测每个合约
-            for sym, name in watchlist:
-                s   = state[sym]
+            # 检测每个 (合约, 周期) 组合
+            for (sym, period_key), s in state.items():
                 k   = s["klines"]
                 valid = k[k["close"] > 0]
                 if len(valid) == 0:
@@ -315,7 +335,7 @@ def main():
                     s["last_dt"] = closed_dt
 
                 # 重新计算 EIS
-                eis = get_closed_bar_eis(k, name)
+                eis = get_closed_bar_eis(k, s["name"])
 
                 # 颜色变化检测
                 old_color = s["color"]
@@ -323,18 +343,19 @@ def main():
 
                 if old_color is not None and new_color != old_color:
                     # 触发信号！
-                    fired = fire_signal(sym, name, old_color, new_color, eis)
+                    fired = fire_signal(sym, s["name"], s["period_label"],
+                                        old_color, new_color, eis)
                     if fired:
                         s["color"]    = new_color
                         s["last_eis"] = eis
                 elif new_bar_closed:
                     # 新 K 线但颜色未变，静默更新
                     s["last_eis"] = eis
-                    # 打印简短状态（仅新 bar 收盘时）
                     ce = COLOR_EMOJI[new_color]
                     print(f"  [{datetime.now().strftime('%H:%M:%S')}] "
-                          f"{name}: 新25min K线收盘 {fmt_time(closed_dt)} "
-                          f"{ce} {new_color}  价格: {eis['last_close']:.0f}",
+                          f"{s['name']} [{s['period_label']}]: 新K线收盘 "
+                          f"{fmt_time(closed_dt)} {ce} {new_color}  "
+                          f"价格: {eis['last_close']:.0f}",
                           flush=True)
 
             # 定期打印状态行
@@ -343,9 +364,10 @@ def main():
                 # 简短状态行
                 trading = is_trading_time()
                 if not trading:
-                    statuses = " | ".join(
-                        f"{s['name']}: {s['color']}" for s in state.values()
-                    )
+                    parts = []
+                    for (sym, period_key), s in state.items():
+                        parts.append(f"{s['name']}[{s['period_label']}]: {s['color']}")
+                    statuses = " | ".join(parts)
                     print(f"  [{datetime.now().strftime('%H:%M:%S')}] "
                           f"⏸ 非交易时段 | {statuses}", flush=True)
 
@@ -356,7 +378,7 @@ def main():
         if _event_log:
             print(f"\n  本次监控共捕获 {len(_event_log)} 次信号:\n")
             for i, e in enumerate(_event_log, 1):
-                print(f"    {i}. {e['time']}  {e['name']}")
+                print(f"    {i}. {e['time']}  {e['name']} [{e['period']}]")
                 print(f"       {COLOR_EMOJI[e['from']]}{e['from']} → "
                       f"{COLOR_EMOJI[e['to']]}{e['to']}  价格: {e['price']:.0f}")
                 print(f"       {e['meaning']}")
