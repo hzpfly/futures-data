@@ -155,78 +155,171 @@ def main():
         print(f"    入场价: {s3b['entry_price']:.0f}  止损: {s3b['stop_loss']:.0f}  风险: {abs(s3b['entry_price']-s3b['stop_loss'])}点")
 
     # ════════════════════════════════════════════════════
-    # 三、综合裁决
+    # 三、Set A 长线: 独立裁决
     # ════════════════════════════════════════════════════
     print(f"\n{'═'*78}")
-    print("  三、综合裁决")
+    print("  三、Set A (长线) 独立裁决: 周线→日线→小时")
     print(f"{'═'*78}")
 
-    # 打分体系
-    score = 0
-    check_pts = []
+    # EIS for Set A periods
+    eis_a = {}
+    for pn in ["weekly", "daily", "hourly"]:
+        eis_a[pn] = determine_eis_color(closed[pn])
 
-    # EIS 权重
-    eis_w = eis_score  # -3 ~ +3
-    score += eis_w * 0.5
-    check_pts.append(f"EIS 动力系统: {eis_score:+d}分 (×0.5权重)")
+    print(f"\n  EIS 动力系统 (周/日/小时):")
+    eis_a_score = 0
+    for pn in ["weekly", "daily", "hourly"]:
+        r = eis_a[pn]
+        c = r["color"]
+        if c == "GREEN":
+            pts, txt = 1, "🟢+1"
+        elif c == "RED":
+            pts, txt = -1, "🔴-1"
+        else:
+            pts, txt = 0, "🔵 0"
+        eis_a_score += pts
+        emoji = {"GREEN": "🟢", "RED": "🔴", "BLUE": "🔵"}[c]
+        print(f"    {pn:<8} {emoji} {c:<5} MACD柱: {r['hist_cur']:+.2f}  {txt}")
 
-    # Triple Screen Set A
-    ts_a = 0
+    # TS Set A score
+    ts_a_raw = 0
     if s1a["trend"] == "bullish":
-        ts_a += 1
+        ts_a_raw += 1
+    elif s1a["trend"] == "bearish":
+        ts_a_raw -= 1
     if s2a["signal"] == "buy_signal":
-        ts_a += 1
+        ts_a_raw += 1
+    elif s2a["signal"] == "sell_signal":
+        ts_a_raw -= 1
     if s3a["signal"] in ("pending_long", "triggered_long"):
-        ts_a += 2
-    check_pts.append(f"三重滤网 A(长线): S1={s1a['trend']} S2={s2a['signal']} S3={s3a['signal']} → {ts_a:+d}分")
+        ts_a_raw += 2
+    elif s3a["signal"] in ("pending_short", "triggered_short"):
+        ts_a_raw -= 2
 
-    # Triple Screen Set B
-    ts_b = 0
-    if s1b["trend"] == "bullish":
-        ts_b += 1
-    if s2b["signal"] == "buy_signal":
-        ts_b += 1
-    if s3b["signal"] in ("pending_long", "triggered_long"):
-        ts_b += 2
-    check_pts.append(f"三重滤网 B(短线): S1={s1b['trend']} S2={s2b['signal']} S3={s3b['signal']} → {ts_b:+d}分")
+    total_a = eis_a_score * 0.5 + ts_a_raw * 0.5
+    print(f"\n  Triple Screen (本 set): S1={s1a['trend']} S2={s2a['signal']} S3={s3a['signal']} → {ts_a_raw:+d}分")
+    print(f"  加权总分: {total_a:+.1f} (EIS ×0.5 + TS ×0.5)")
 
-    score += ts_a * 0.3 + ts_b * 0.2
-
-    print()
-    for pt in check_pts:
-        print(f"  {pt}")
-    print(f"\n  ▶ 加权总分: {score:+.1f}")
-
-    if score >= 2.5:
-        verdict = "✅ 强烈做多 — 两套系统高度一致"
-    elif score >= 1.5:
-        verdict = "✅ 可以做多 — 信号偏多但胜率尚可"
-    elif score >= 0.5:
-        verdict = "⚠️ 谨慎偏多 — 用半仓或更小仓位"
-    elif score >= -0.5:
-        verdict = "⚠️ 观望 — 信号矛盾，不交易"
-    elif score >= -1.5:
-        verdict = "⚠️ 谨慎偏空"
-    elif score >= -2.5:
-        verdict = "❌ 可以做空"
+    # Verdict for Set A
+    if total_a >= 2.0:
+        va = "✅ 强烈可信 — EIS+TS 一致确认, 主力仓位"
+    elif total_a >= 1.0:
+        va = "✅ 可信 — 信号方向明确, 正常仓位"
+    elif total_a >= 0.3:
+        va = "⚠️ 谨慎 — 信号偏弱, 建议半仓"
+    elif total_a >= -0.3:
+        va = "⚠️ 观望 — EIS与TS矛盾, 不交易"
+    elif total_a >= -1.0:
+        va = "⚠️ 谨慎偏空"
+    elif total_a >= -2.0:
+        va = "❌ 做空可信"
     else:
-        verdict = "❌ 强烈做空"
+        va = "❌ 强烈做空可信"
+    print(f"  ▶ Set A 裁决: {va}")
 
-    print(f"  ▶ 最终建议: {verdict}")
+    # Warnings for Set A
+    if eis_a["weekly"]["color"] == "BLUE":
+        print(f"    ⚠️ 周线 EIS 蓝色 → 大趋势不确定")
+    if eis_a["daily"]["color"] == "BLUE":
+        print(f"    ⚠️ 日线 EIS 蓝色 → 中期方向模糊")
 
-    # 风险提示
-    print(f"\n  ⚠️ 风险管理提醒:")
-    if s1a["trend"] == "bullish" and s1b["trend"] == "bearish":
-        print(f"    多周期冲突: 周线偏多但小时线偏空 → 可能高位回调中")
-        print(f"    对策: 缩小仓位, 宽止损, 或等小时线翻多再入场")
+    ts_dir_a = "long" if ts_a_raw > 0 else ("short" if ts_a_raw < 0 else "neutral")
+    eis_dir_a = "long" if eis_a_score > 0 else ("short" if eis_a_score < 0 else "neutral")
+    if ts_dir_a == "long" and eis_dir_a == "short":
+        print(f"    ⚠️ 致命冲突: TS看多但EIS看空 → 不入场!")
+    elif ts_dir_a == "short" and eis_dir_a == "long":
+        print(f"    ⚠️ 致命冲突: TS看空但EIS看多 → 不入场!")
 
-    if eis_results["weekly"]["color"] == "BLUE":
-        print(f"    周线 EIS 蓝色(EMA/MACD矛盾) → 大趋势不确定")
-        print(f"    对策: 不适合趋势单, 最多短线试探")
+    if s3a["signal"] != "no_signal" and s3a["signal"] != "none":
+        print(f"    入场价: {s3a['entry_price']:.0f}  止损: {s3a['stop_loss']:.0f}")
 
-    if eis_results["daily"]["color"] == "BLUE":
-        print(f"    日线 EIS 蓝色 → 日线方向不明确")
-        print(f"    对策: 确认信号前一两天先观望")
+    # ════════════════════════════════════════════════════
+    # 四、Set B 短线: 独立裁决
+    # ════════════════════════════════════════════════════
+    print(f"\n{'═'*78}")
+    print("  四、Set B (短线) 独立裁决: 小时→15min→3min")
+    print(f"{'═'*78}")
+
+    # EIS for Set B periods
+    eis_b = {}
+    for pn in ["hourly", "15min", "3min"]:
+        eis_b[pn] = determine_eis_color(closed[pn])
+
+    print(f"\n  EIS 动力系统 (小时/15分/3分):")
+    eis_b_score = 0
+    for pn in ["hourly", "15min", "3min"]:
+        r = eis_b[pn]
+        c = r["color"]
+        if c == "GREEN":
+            pts, txt = 1, "🟢+1"
+        elif c == "RED":
+            pts, txt = -1, "🔴-1"
+        else:
+            pts, txt = 0, "🔵 0"
+        eis_b_score += pts
+        emoji = {"GREEN": "🟢", "RED": "🔴", "BLUE": "🔵"}[c]
+        print(f"    {pn:<8} {emoji} {c:<5} MACD柱: {r['hist_cur']:+.2f}  {txt}")
+
+    # TS Set B score
+    ts_b_raw = 0
+    if s1b["trend"] == "bullish":
+        ts_b_raw += 1
+    elif s1b["trend"] == "bearish":
+        ts_b_raw -= 1
+    if s2b["signal"] == "buy_signal":
+        ts_b_raw += 1
+    elif s2b["signal"] == "sell_signal":
+        ts_b_raw -= 1
+    if s3b["signal"] in ("pending_long", "triggered_long"):
+        ts_b_raw += 2
+    elif s3b["signal"] in ("pending_short", "triggered_short"):
+        ts_b_raw -= 2
+
+    total_b = eis_b_score * 0.5 + ts_b_raw * 0.5
+    print(f"\n  Triple Screen (本 set): S1={s1b['trend']} S2={s2b['signal']} S3={s3b['signal']} → {ts_b_raw:+d}分")
+    print(f"  加权总分: {total_b:+.1f} (EIS ×0.5 + TS ×0.5)")
+
+    # Verdict for Set B
+    if total_b >= 2.0:
+        vb = "✅ 强烈可信 — EIS+TS 一致确认, 主力仓位"
+    elif total_b >= 1.0:
+        vb = "✅ 可信 — 信号方向明确, 正常仓位"
+    elif total_b >= 0.3:
+        vb = "⚠️ 谨慎 — 信号偏弱, 建议半仓"
+    elif total_b >= -0.3:
+        vb = "⚠️ 观望 — EIS与TS矛盾, 不交易"
+    elif total_b >= -1.0:
+        vb = "⚠️ 谨慎偏空"
+    elif total_b >= -2.0:
+        vb = "❌ 做空可信"
+    else:
+        vb = "❌ 强烈做空可信"
+    print(f"  ▶ Set B 裁决: {vb}")
+
+    # Warnings for Set B
+    ts_dir_b = "long" if ts_b_raw > 0 else ("short" if ts_b_raw < 0 else "neutral")
+    eis_dir_b = "long" if eis_b_score > 0 else ("short" if eis_b_score < 0 else "neutral")
+    if ts_dir_b == "long" and eis_dir_b == "short":
+        print(f"    ⚠️ 致命冲突: TS看多但EIS看空 → 不入场!")
+    elif ts_dir_b == "short" and eis_dir_b == "long":
+        print(f"    ⚠️ 致命冲突: TS看空但EIS看多 → 不入场!")
+
+    if s3b["signal"] != "no_signal" and s3b["signal"] != "none":
+        print(f"    入场价: {s3b['entry_price']:.0f}  止损: {s3b['stop_loss']:.0f}")
+
+    # ════════════════════════════════════════════════════
+    # 五、两套系统对比
+    # ════════════════════════════════════════════════════
+    print(f"\n{'═'*78}")
+    print("  五、A/B 对比 (不合并, 仅供参照)")
+    print(f"{'═'*78}")
+    print(f"  Set A (长线): 总分 {total_a:+.1f} → {va}")
+    print(f"  Set B (短线): 总分 {total_b:+.1f} → {vb}")
+
+    if ts_dir_a == ts_dir_b != "neutral":
+        print(f"  ✅ A/B 方向一致 ({ts_dir_a}) — 大周期和小周期共振")
+    elif ts_dir_a != "neutral" and ts_dir_b != "neutral" and ts_dir_a != ts_dir_b:
+        print(f"  ⚠️ A/B 方向背离 — 长线{ts_dir_a} vs 短线{ts_dir_b}, 等待方向统一")
 
     print(f"\n{'═'*78}")
     print(f"  验证完成 | {datetime.now().strftime('%H:%M:%S')}")
