@@ -230,24 +230,27 @@ def _find_local_extrema(series, window=3, mode="max"):
     return extrema
 
 
-def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_window=3):
+def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_window=3,
+                              price_ema_span=5):
     """
     Elder's Triple Screen — Screen 2: 中期振荡器回调信号
 
-    当 Screen 1 有明确方向时，使用 Force Index EMA(2) 检测逆势回调：
-    - Screen 1 多头 + FI 为负 → 回调买入信号
-    - Screen 1 空头 + FI 为正 → 反弹卖出信号
-    - Screen 1 中性 → 无信号
-    - 额外检测 FI 与价格的背离
+    当 Screen 1 有明确方向时，三步验证逆势回调：
+    1. Force Index EMA(2) 方向 —— 空头/多头力量确认
+    2. 价格 vs 短期EMA —— 价格是否确实回抽（存在性确认）
+    3. FI 背离 —— 卖压/买压是否衰竭（到位确认）
+
+    只有 FI 和价格同时满足条件，才发出有效 Screen 2 信号。
 
     Returns:
         dict: signal / fi_value / fi_recent / fi_above_zero /
-              zero_cross / divergence / pullback_desc
+              zero_cross / divergence / price_confirmed / pullback_desc
     """
     no_signal = {
         "signal": "no_signal", "fi_value": 0.0, "fi_recent": [],
         "fi_above_zero": True, "zero_cross": "none",
-        "divergence": "none", "pullback_desc": "Screen 1 趋势不明 → 无回调信号",
+        "divergence": "none", "price_confirmed": False,
+        "pullback_desc": "Screen 1 趋势不明 → 无回调信号",
     }
 
     if screen1_trend == "neutral":
@@ -264,6 +267,14 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
     # ── Current FI state ──
     fi_value = recent_fi.iloc[-1]
     fi_above_zero = fi_value > 0
+
+    # ── Price pullback check: close vs short EMA ──
+    close_series = klines_5min["close"]
+    close_ema = close_series.ewm(span=price_ema_span, adjust=False).mean()
+    latest_close = close_series.iloc[-1]
+    latest_ema = close_ema.iloc[-1]
+    price_below_ema = latest_close < latest_ema   # 多头回调确认
+    price_above_ema = latest_close > latest_ema   # 空头反弹确认
 
     # ── Zero-crossing detection (last 2 bars) ──
     prev_fi = recent_fi.iloc[-2]
@@ -301,24 +312,49 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
                     and fi_for_div.iloc[peaks_fi[-1]] < fi_for_div.iloc[peaks_fi[-2]]):
                 divergence = "bearish"
 
-    # ── Signal determination ──
+    # ── Signal determination (FI + Price 双重确认) ──
+    price_confirmed = False
     if screen1_trend == "bullish":
         if fi_value < 0:
-            if divergence == "bullish":
-                signal = "divergence_buy"
+            if price_below_ema:
+                # FI确认空头力量 + 价格确认回抽 → 有效回调信号
+                price_confirmed = True
+                if divergence == "bullish":
+                    signal = "divergence_buy"
+                    pullback_desc = (f"多头回调: FI为负(卖压在) + 收盘{latest_close:.0f}低于"
+                                     f"EMA{price_ema_span}({latest_ema:.0f}) → 价格已回抽 "
+                                     f"┃ FI底背离 → 卖压衰竭，回调到位")
+                else:
+                    signal = "buy_signal"
+                    pullback_desc = (f"多头回调: FI为负(卖压在) + 收盘{latest_close:.0f}低于"
+                                     f"EMA{price_ema_span}({latest_ema:.0f}) → 价格已回抽，回调买入机会")
             else:
-                signal = "buy_signal"
-            pullback_desc = "多头回调: FI为负 → 回调买入机会"
+                # FI为负但价格未跌破短期EMA → 回调力度不足
+                signal = "no_signal"
+                pullback_desc = (f"多头趋势FI为负，但收盘{latest_close:.0f}≥EMA{price_ema_span}"
+                                 f"({latest_ema:.0f}) → 价格未真正回抽，回调信号不成立")
         else:
             signal = "no_signal"
             pullback_desc = "多头趋势中FI为正 → 趋势延续，无回调机会"
     elif screen1_trend == "bearish":
         if fi_value > 0:
-            if divergence == "bearish":
-                signal = "divergence_sell"
+            if price_above_ema:
+                # FI确认多头力量 + 价格确认反弹 → 有效反弹信号
+                price_confirmed = True
+                if divergence == "bearish":
+                    signal = "divergence_sell"
+                    pullback_desc = (f"空头反弹: FI为正(买压在) + 收盘{latest_close:.0f}高于"
+                                     f"EMA{price_ema_span}({latest_ema:.0f}) → 价格已反弹 "
+                                     f"┃ FI顶背离 → 买压衰竭，反弹到位")
+                else:
+                    signal = "sell_signal"
+                    pullback_desc = (f"空头反弹: FI为正(买压在) + 收盘{latest_close:.0f}高于"
+                                     f"EMA{price_ema_span}({latest_ema:.0f}) → 价格已反弹，反弹卖出机会")
             else:
-                signal = "sell_signal"
-            pullback_desc = "空头反弹: FI为正 → 反弹卖出机会"
+                # FI为正但价格未突破短期EMA → 反弹力度不足
+                signal = "no_signal"
+                pullback_desc = (f"空头趋势FI为正，但收盘{latest_close:.0f}≤EMA{price_ema_span}"
+                                 f"({latest_ema:.0f}) → 价格未真正反弹，反弹信号不成立")
         else:
             signal = "no_signal"
             pullback_desc = "空头趋势中FI为负 → 趋势延续，无反弹机会"
@@ -331,6 +367,7 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
         "signal": signal, "fi_value": round(fi_value, 2),
         "fi_recent": fi_recent, "fi_above_zero": fi_above_zero,
         "zero_cross": zero_cross, "divergence": divergence,
+        "price_confirmed": price_confirmed,
         "pullback_desc": pullback_desc,
     }
 
