@@ -10,6 +10,9 @@ Usage:
     python probe_cf609.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from tqsdk import TqApi, TqAuth
 from datetime import datetime
 import time as _time

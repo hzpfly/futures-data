@@ -2,7 +2,7 @@
 set PYTHON=C:\Users\hzpfly\AppData\Local\Programs\Python\Python312\python.exe
 
 echo ============================================
-echo  Futures Monitor (JD / CF / DCE / CZCE)
+echo  Futures Monitor (5 contracts: CF JD LH CJ C)
 echo ============================================
 echo.
 echo [0] Installing/updating dependencies...

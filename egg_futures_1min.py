@@ -11,6 +11,7 @@
 
 from tqsdk import TqApi, TqAuth
 import pandas as pd
+import re
 from datetime import datetime, time
 import time as _time
 from config_loader import get_tqsdk_auth
@@ -49,42 +50,67 @@ def next_trading_time():
     return "次日 09:00"
 
 
-def discover_main_contract(api):
-    """按持仓量确定鸡蛋主力合约"""
-    quotes = api.query_quotes(ins_class="FUTURE", exchange_id="DCE", expired=False)
-    jd_contracts = sorted([q for q in quotes if "jd" in q.lower()])
+def discover_main_contract_generic(api, exchange_id, product_code):
+    """通用主力合约发现 —— 按持仓量最大
 
-    if not jd_contracts:
-        return "DCE.jd2605"
-    if len(jd_contracts) == 1:
-        return jd_contracts[0]
+    Args:
+        api:           TqApi 实例
+        exchange_id:   交易所代码 (DCE / CZCE)
+        product_code:  品种代码 (jd / lh / c / CF / CJ …)
 
-    jd_quotes = {c: api.get_quote(c) for c in jd_contracts}
+    Returns:
+        str: 类似 "DCE.jd2605" / "CZCE.CF609", 找不到时返回 None
+
+    匹配规则: 正则 ^exchange.product_code + 数字$ ，避免例如
+    DCE.c 误匹配 DCE.cs（淀粉）等情况。
+    """
+    quotes = api.query_quotes(ins_class="FUTURE", exchange_id=exchange_id, expired=False)
+
+    # 精确匹配: EXCHANGE.PRODUCT_CODE + 至少一位数字
+    pattern = re.compile(
+        rf'^{re.escape(exchange_id)}\.{re.escape(product_code)}\d+$',
+        re.IGNORECASE,
+    )
+    contracts = sorted([q for q in quotes if pattern.match(q)])
+
+    if not contracts:
+        print(f"  ⚠️  {exchange_id}.{product_code} 未找到任何合约")
+        return None
+    if len(contracts) == 1:
+        return contracts[0]
+
+    # ── 按持仓量选最大 ──
+    contract_quotes = {c: api.get_quote(c) for c in contracts}
     deadline = _time.time() + 5
     while _time.time() < deadline:
         api.wait_update(deadline=_time.time())
 
-    best_code = jd_contracts[0]
+    best_code = contracts[0]
     best_oi = 0
-    for code in jd_contracts:
-        q = jd_quotes[code]
+    for code in contracts:
+        q = contract_quotes[code]
         oi = getattr(q, "open_interest", 0) or 0
         if oi > best_oi:
             best_oi = oi
             best_code = code
 
     if best_oi == 0:
-        return jd_contracts[0]
+        return contracts[0]
 
-    print(f"  持仓最大: {best_code} ({int(best_oi)} 手)")
+    print(f"  主力合约: {best_code} (持仓 {int(best_oi)} 手)")
     others = sorted(
-        [(c, getattr(jd_quotes[c], "open_interest", 0) or 0) for c in jd_contracts],
-        key=lambda x: x[1], reverse=True
+        [(c, getattr(contract_quotes[c], "open_interest", 0) or 0) for c in contracts],
+        key=lambda x: x[1], reverse=True,
     )
     if len(others) > 1:
         print(f"  其他: " + ", ".join(f"{c}({int(oi)})" for c, oi in others[1:5]))
 
     return best_code
+
+
+def discover_main_contract(api):
+    """按持仓量确定鸡蛋主力合约 (保持向后兼容)"""
+    return discover_main_contract_generic(api, "DCE", "jd")
 
 
 def fmt_time(ns_datetime):

@@ -9,9 +9,12 @@ Triple Screen 多周期信号实时监控
   Set B (短线):  小时 → 15min → 3min
                  (大趋势  /  中期回调  /  精确入场)
 
-每套三重滤网覆盖两个合约:
-  - CZCE.CF609   (棉花 2609, 含夜盘 21:00-23:00)
-  - JD 主力        (持仓量最大合约, 仅日盘)
+每套三重滤网覆盖 5 个期货主力合约:
+  - 棉花 CF (CZCE, 夜盘)     - 鸡蛋 JD (DCE, 仅日盘)
+  - 生猪 LH (DCE, 仅日盘)     - 红枣 CJ (CZCE, 仅日盘)
+  - 玉米 C  (DCE, 夜盘)
+
+所有合约通过持仓量自动发现当前主力。
 
 信号触发时机 (Screen 3 状态变化):
   no_signal  → pending_long / pending_short    : 入场机会出现
@@ -23,7 +26,7 @@ Screen 1 趋势反转也独立通知 (决定平仓方向).
 
 K 线订阅共享:
   Set A 的 Screen 3 (小时) == Set B 的 Screen 1 (小时)
-  共 10 个独立订阅 = 5 周期 × 2 合约
+  共 25 个独立订阅 = 5 周期 × 5 合约
 
 用法:
     python triple_screen_monitor.py
@@ -43,7 +46,7 @@ from egg_futures_1min import (
     determine_screen3_entry,
     calc_macd,
     calc_ema,
-    discover_main_contract,
+    discover_main_contract_generic,
 )
 
 
@@ -61,11 +64,14 @@ STATUS_SEC     = 120           # 非交易时段状态行刷新间隔
 ALERT_COOLDOWN = 180           # 同一(合约,set,signal) 冷却期(秒)
 
 # ── 监控合约 ──────────────────────────────────────────────
-# (symbol_template, name, tick_size, has_night_session)
-# symbol_template 用 {JD_MAIN} 占位会替换成实际主力合约
+# 每个品种自动通过持仓量发现主力合约
+# (exchange, product_code, display_name, tick_size, has_night_session)
 CONTRACTS = [
-    {"symbol": "CZCE.CF609", "name": "CF609 棉花", "tick": 5, "night": True},
-    # JD 主力在运行时通过 discover_main_contract 填充
+    {"exchange": "CZCE", "product": "CF",  "name": "棉花", "tick": 5, "night": True},
+    {"exchange": "DCE",  "product": "jd",  "name": "鸡蛋", "tick": 1, "night": False},
+    {"exchange": "DCE",  "product": "lh",  "name": "生猪", "tick": 5, "night": False},
+    {"exchange": "CZCE", "product": "CJ",  "name": "红枣", "tick": 5, "night": False},
+    {"exchange": "DCE",  "product": "c",   "name": "玉米", "tick": 1, "night": True},
 ]
 
 # ── 两套三重滤网周期配置 ──────────────────────────────────
@@ -115,11 +121,16 @@ NIGHT_SESSIONS = [
 ]
 
 # ── 信号说明 ──────────────────────────────────────────────
+# pending_long:  屏1看涨+屏2回调→屏3挂买入止损单 (buy stop),
+#                即"当价格涨到 X 时买入"的预挂单
+# pending_short: 屏1看跌+屏2反弹→屏3挂卖出止损单 (sell stop),
+#                即"当价格跌到 X 时卖出"的预挂单
+# 止损单触发后才执行, 在此之前只是预挂, 不会被成交
 SIGNAL_DESC = {
     "no_signal":        "无信号",
-    "pending_long":     "🟢 待做多 (买入止损单已挂)",
+    "pending_long":     "🟢 待做多",
     "triggered_long":   "🟢🟢 做多触发!",
-    "pending_short":    "🔴 待做空 (卖出止损单已挂)",
+    "pending_short":    "🔴 待做空",
     "triggered_short":  "🔴🔴 做空触发!",
     "cancelled":        "❌ 信号取消",
 }
@@ -325,7 +336,15 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
     print(f"  Screen 3 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen3_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen3_period'], '')})")
     print(f"    信号: {new_state['s3_signal']}")
     if new_state["s3_signal"] in ("pending_long", "triggered_long", "pending_short", "triggered_short"):
-        print(f"    入场价: {new_state['s3_entry']:.0f}  止损: {new_state['s3_stop']:.0f}")
+        entry_p = new_state['s3_entry']
+        stop_p  = new_state['s3_stop']
+        print(f"    入场价: {entry_p:.0f}  止损价: {stop_p:.0f}  风险: {abs(entry_p - stop_p):.0f}")
+        if "long" in new_state["s3_signal"]:
+            print(f"    ▸ 买入止损单 (Buy Stop): 价格突破 {entry_p:.0f} 做多, 跌破 {stop_p:.0f} 止损")
+        elif "short" in new_state["s3_signal"]:
+            print(f"    ▸ 卖出止损单 (Sell Stop): 价格跌破 {entry_p:.0f} 做空, 突破 {stop_p:.0f} 止损")
+        if "pending" in new_state["s3_signal"]:
+            print(f"    ▸ 当前为预挂状态, 尚未成交, 等待价格触发")
     print(f"    {new_state['s3_desc']}")
     print(f"  {'='*72}\n", flush=True)
 
@@ -334,7 +353,12 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
         title = f"三重滤网 {set_name}: {contract_name}"
         body = f"{SIGNAL_DESC.get(new_state['combined'], new_state['combined'])}\n时间: {now_str}"
         if new_state["s3_signal"] in ("pending_long", "triggered_long", "pending_short", "triggered_short"):
-            body += f"\n入场: {new_state['s3_entry']:.0f}  止损: {new_state['s3_stop']:.0f}"
+            ep = new_state['s3_entry']
+            sp = new_state['s3_stop']
+            risk = abs(ep - sp)
+            body += f"\n入场价: {ep:.0f}  止损价: {sp:.0f}  风险: {risk:.0f}"
+            if "pending" in new_state["s3_signal"]:
+                body += "\n(预挂单, 待价格触发)"
     else:
         title = f"趋势反转 {set_name}: {contract_name}"
         body = (f"{TREND_DESC.get(old_state['s1_trend'])} → "
@@ -355,21 +379,30 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
 
 # ── 状态打印 ──────────────────────────────────────────────
 def print_status(state):
-    """打印所有 (set, contract) 的当前状态"""
+    """打印所有 (set, contract) 的当前状态, pending/triggered 时显示入场价和止损"""
     print(f"\n  [{''.join(['─']*72)}]")
     print(f"  [{datetime.now().strftime('%H:%M:%S')}] 状态快照")
     print(f"  {'─'*72}")
-    print(f"  {'Set':<10} {'合约':<18} {'屏1趋势':<14} {'屏2信号':<16} {'屏3综合信号':<24}")
+    print(f"  {'Set':<10} {'合约':<14} {'屏1趋势':<14} {'屏2':<14} {'屏3信号':<20} {'入场/止损':<16}")
     print(f"  {'─'*72}")
 
     for (set_name, contract_name), s in state.items():
         s1_t = s["current"].get("s1_trend", "neutral")
         s2_s = s["current"].get("s2_signal", "no_signal")
         comb = s["current"].get("combined", "no_signal")
+        entry = s["current"].get("s3_entry", 0) or 0
+        stop  = s["current"].get("s3_stop",  0) or 0
 
         trend_str = TREND_DESC.get(s1_t, s1_t)
         sig_str   = SIGNAL_DESC.get(comb, comb)
-        print(f"  {set_name:<10} {contract_name:<18} {trend_str:<14} {s2_s:<16} {sig_str:<24}")
+
+        # 显示入场/止损价格
+        if comb in ("pending_long", "triggered_long", "pending_short", "triggered_short"):
+            price_str = f"{entry:.0f} / {stop:.0f}"
+        else:
+            price_str = "—"
+
+        print(f"  {set_name:<10} {contract_name:<14} {trend_str:<14} {s2_s:<14} {sig_str:<20} {price_str:<16}")
     print(f"  {'─'*72}", flush=True)
 
 
@@ -397,7 +430,7 @@ def print_startup_banner(state):
     print(f"    2. Screen 1 趋势反转 (bullish↔bearish)")
     print(f"\n  交易时段:")
     print(f"    白盘: 09:00-10:15 / 10:30-11:30 / 13:30-15:00")
-    print(f"    夜盘: 21:00-23:00 (仅 CF609)")
+    print(f"    夜盘: 21:00-23:00 (CF/C 有夜盘; CJ/JD/LH 仅白盘)")
     print(f"  通知方式: Windows 桌面 Toast + 控制台响铃")
     print(f"  冷却期  : 同一信号 {ALERT_COOLDOWN} 秒内不重复")
     print(f"  按 Ctrl+C 退出监控")
@@ -411,19 +444,29 @@ def main():
     api = TqApi(auth=TqAuth(username, password))
 
     try:
-        # ── 确定 JD 主力 ──
-        print("\n--- 确定 JD 主力合约 ---")
-        jd_symbol = discover_main_contract(api)
-        print(f"  JD 主力: {jd_symbol}")
+        # ── 发现所有主力合约 ──
+        print("\n--- 发现主力合约 ---")
+        contracts = []
+        for cfg in CONTRACTS:
+            print(f"\n  [{cfg['name']}] {cfg['exchange']}.{cfg['product']}:")
+            symbol = discover_main_contract_generic(api, cfg["exchange"], cfg["product"])
+            if symbol is None:
+                print(f"    ⚠️  跳过 (未找到合约)")
+                continue
+            contracts.append({
+                "symbol": symbol,
+                "name": f"{cfg['name']} ({symbol.split('.')[-1].upper()})",
+                "tick": cfg["tick"],
+                "night": cfg["night"],
+            })
 
-        # ── 构建合约列表 ──
-        contracts = list(CONTRACTS) + [
-            {"symbol": jd_symbol, "name": f"{jd_symbol.split('.')[-1].upper()} 鸡蛋主力",
-             "tick": 1, "night": False},
-        ]
-        print(f"\n监控合约:")
+        if not contracts:
+            print("\n  ⚠️  没有发现任何合约, 退出")
+            return
+
+        print(f"\n  监控 {len(contracts)} 个合约:")
         for c in contracts:
-            print(f"  {c['name']:<22} {c['symbol']:<14} tick={c['tick']} 夜盘={'有' if c['night'] else '无'}")
+            print(f"  {c['name']:<24} {c['symbol']:<16} tick={c['tick']} 夜盘={'有' if c['night'] else '无'}")
 
         # ── 订阅所有 K 线 (共享, 每合约 × 5 周期) ──
         # klines_store[(symbol, period_key)] = K 线 DataFrame
@@ -519,14 +562,24 @@ def main():
                 dt3 = get_last_closed_dt(k_s3, night)
 
                 # 是否任一周期有新 K 线收盘
+                old_dt = s["last_dt_per_screen"]  # 先保存旧值
                 new_bar = (
-                    dt1 > s["last_dt_per_screen"]["screen1"]
-                    or dt2 > s["last_dt_per_screen"]["screen2"]
-                    or dt3 > s["last_dt_per_screen"]["screen3"]
+                    dt1 > old_dt["screen1"]
+                    or dt2 > old_dt["screen2"]
+                    or dt3 > old_dt["screen3"]
                 )
 
                 if not new_bar:
                     continue
+
+                # 判断哪个周期有新 K 线 (在更新前用旧值对比)
+                changed_periods = []
+                if dt1 > old_dt["screen1"]:
+                    changed_periods.append(ts["screen1_period"])
+                if dt2 > old_dt["screen2"]:
+                    changed_periods.append(ts["screen2_period"])
+                if dt3 > old_dt["screen3"]:
+                    changed_periods.append(ts["screen3_period"])
 
                 # 更新已收盘时间记录
                 s["last_dt_per_screen"] = {"screen1": dt1, "screen2": dt2, "screen3": dt3}
@@ -562,11 +615,9 @@ def main():
                     # 新 K 线收盘时简短打印
                     now_str = datetime.now().strftime("%H:%M:%S")
                     sig_str = SIGNAL_DESC.get(new_combined, new_combined)
-                    which_period = ""
-                    if dt1 > s["last_dt_per_screen"].get("screen1", 0) - 1:
-                        which_period = ts["screen1_period"]
+                    periods_str = ",".join(PERIOD_LABEL.get(p, p) for p in changed_periods)
                     print(f"  [{now_str}] [{set_name}|{contract_n}] "
-                          f"新K线收盘 {PERIOD_LABEL[which_period]}  "
+                          f"新K线收盘 {periods_str}  "
                           f"信号: {sig_str}", flush=True)
 
                 s["current"] = new_eval
