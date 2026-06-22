@@ -1,6 +1,6 @@
 """
-Triple Screen 多周期信号实时监控
-================================
+Triple Screen 多周期信号实时监控 (含 EIS 交叉验证)
+===================================================
 同时监控两套 Elder's Triple Screen 三重滤网组合:
 
   Set A (长线):  周线 → 日线 → 小时
@@ -15,6 +15,10 @@ Triple Screen 多周期信号实时监控
   - 玉米 C  (DCE, 夜盘)
 
 所有合约通过持仓量自动发现当前主力。
+
+⚡ 交叉验证: 信号触发时自动运行 EIS 动力系统多周期检查，
+   给出可信度评分 (加权总分) 和明确的风险提示。
+   Triple Screen 和 EIS 方向一致 → 高可信; 方向冲突 → 强烈警告。
 
 信号触发时机 (Screen 3 状态变化):
   no_signal  → pending_long / pending_short    : 入场机会出现
@@ -48,6 +52,7 @@ from egg_futures_1min import (
     calc_ema,
     discover_main_contract_generic,
 )
+from weekly_eis import determine_eis_color
 
 
 # ── 配置 ──────────────────────────────────────────────────
@@ -142,6 +147,15 @@ TREND_DESC = {
 }
 
 
+# ── EIS 交叉验证配置 ───────────────────────────────────────
+# 每套滤网对应哪些 EIS 周期做多周期验证
+EIS_PERIODS_FOR_SET = {
+    "A_长线": ["weekly", "daily", "hourly"],
+    "B_短线": ["daily", "hourly", "15min"],
+}
+
+EIS_COLOR_EMOJI = {"GREEN": "🟢", "RED": "🔴", "BLUE": "🔵"}
+
 # ── 全局状态 ──────────────────────────────────────────────
 _event_log = []              # 信号事件历史
 _last_alert_time = {}        # 冷却期记录
@@ -235,6 +249,119 @@ def play_alert_sound(level="normal"):
             winsound.Beep(1320, 300)
     except Exception:
         pass
+
+
+# ── EIS 交叉验证 ──────────────────────────────────────────
+def compute_eis_cross_verify(klines_closed, set_name, ts_eval, tick_size):
+    """
+    用 EIS 动力系统对 Triple Screen 信号做交叉验证。
+    返回打分 + 各周期详细数据 + 可信度结论。
+
+    输入:
+      klines_closed: dict, {period_key: 已收盘K线DataFrame}
+      set_name: "A_长线" / "B_短线"
+      ts_eval: evaluate_triple_screen 的输出
+      tick_size: 最小变动价位
+
+    返回:
+      { score, eis_colors, check_items, verdict, warnings }
+    """
+    periods = EIS_PERIODS_FOR_SET.get(set_name, ["daily", "hourly"])
+    eis_results = {}
+
+    # ── 第一步: 各周期 EIS 颜色 ──
+    for pn in periods:
+        k = klines_closed.get(pn)
+        if k is None or len(k) < 30:
+            eis_results[pn] = {"color": "BLUE", "note": f"数据不足"}
+            continue
+        eis_results[pn] = determine_eis_color(k)
+
+    # ── 第二步: EIS 多周期打分 (每周期 ±1) ──
+    eis_score = 0
+    eis_details = []
+    for pn in periods:
+        r = eis_results[pn]
+        c = r["color"]
+        if c == "GREEN":
+            pts, txt = 1, "🟢+1"
+        elif c == "RED":
+            pts, txt = -1, "🔴-1"
+        else:
+            pts, txt = 0, "🔵 0"
+        eis_score += pts
+        eis_details.append((pn, PERIOD_LABEL.get(pn, pn), c, pts, txt,
+                           r.get("ema_slope","?"), r.get("hist_slope","?"),
+                           r.get("hist_cur", 0)))
+
+    # ── 第三步: Triple Screen 自身打分 ──
+    ts_a_score = 0
+    ts_b_score = 0
+    s1t = ts_eval.get("s1_trend", "neutral")
+    s2s = ts_eval.get("s2_signal", "no_signal")
+    s3s = ts_eval.get("s3_signal", "no_signal")
+
+    if s1t == "bullish":
+        ts_a_score += 1  # (simplified: use same scoring for both sets,权重在下面乘)
+    elif s1t == "bearish":
+        ts_a_score -= 1
+    if s2s == "buy_signal":
+        ts_a_score += 1
+    elif s2s == "sell_signal":
+        ts_a_score -= 1
+    if s3s in ("pending_long", "triggered_long"):
+        ts_a_score += 2
+    elif s3s in ("pending_short", "triggered_short"):
+        ts_a_score -= 2
+
+    # ── 第四步: 加权汇总 ──
+    total = eis_score * 0.5 + ts_a_score * (0.3 if set_name == "A_长线" else 0.2)
+
+    # ── 第五步: 可信度裁决 ──
+    if total >= 2.5:
+        verdict = "✅ 强烈可信 — 两套系统高度一致, 主力仓位"
+    elif total >= 1.5:
+        verdict = "✅ 可信 — 信号偏多, 正常仓位"
+    elif total >= 0.5:
+        verdict = "⚠️ 谨慎 — 信号偏弱, 建议半仓"
+    elif total >= -0.5:
+        verdict = "⚠️ 观望 — 信号矛盾明显, 不建议交易"
+    elif total >= -1.5:
+        verdict = "⚠️ 谨慎偏空"
+    elif total >= -2.5:
+        verdict = "❌ 做空可信"
+    else:
+        verdict = "❌ 强烈做空可信"
+
+    # ── 第六步: 风险提示 ──
+    warnings = []
+    green_count = sum(1 for r in eis_results.values() if r["color"] == "GREEN")
+    red_count   = sum(1 for r in eis_results.values() if r["color"] == "RED")
+    blue_count  = sum(1 for r in eis_results.values() if r["color"] == "BLUE")
+
+    # 多周期冲突
+    if green_count > 0 and red_count > 0:
+        warnings.append(f"多周期冲突: {green_count}个周期看多 vs {red_count}个周期看空 → 趋势不统一, 风险加大")
+    if blue_count >= 2:
+        warnings.append(f"{blue_count}个周期 EIS 蓝色(方向不明) → 趋势模糊, 不宜重仓")
+
+    # EIS 与 Triple Screen 方向冲突
+    ts_direction = "long" if ts_a_score > 0 else ("short" if ts_a_score < 0 else "neutral")
+    eis_direction = "long" if eis_score > 0 else ("short" if eis_score < 0 else "neutral")
+    if ts_direction == "long" and eis_direction == "short":
+        warnings.append("致命冲突: Triple Screen 看多但 EIS 动力系统一致看空 → 信号极不可靠, 坚决不入场")
+    elif ts_direction == "short" and eis_direction == "long":
+        warnings.append("致命冲突: Triple Screen 看空但 EIS 动力系统一致看多 → 信号极不可靠, 坚决不入场")
+
+    return {
+        "score": total,
+        "eis_score": eis_score,
+        "ts_score": ts_a_score,
+        "eis_colors": eis_results,
+        "eis_details": eis_details,
+        "verdict": verdict,
+        "warnings": warnings,
+    }
 
 
 # ── 三重滤网综合判定 ──────────────────────────────────────
@@ -348,6 +475,38 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
     print(f"    {new_state['s3_desc']}")
     print(f"  {'='*72}\n", flush=True)
 
+    # ── EIS 交叉验证 ──
+    if eis_extra:
+        print(f"  ╔{'═'*68}╗")
+        print(f"  ║  EIS 动力系统交叉验证")
+        print(f"  ╠{'═'*68}╣")
+
+        # 各周期 EIS 颜色
+        for pn, plabel, color, pts, ptxt, ema_s, hist_s, hist_val in eis_extra["eis_details"]:
+            ce = EIS_COLOR_EMOJI.get(color, "⬜")
+            print(f"  ║  [{plabel:<6}] {ce} {color:<5} "
+                  f"(EMA{ema_s}/MACD柱{hist_s})  "
+                  f"MACD柱: {hist_val:+.2f}  {ptxt}")
+
+        print(f"  ╠{'─'*68}╣")
+
+        # 打分明细
+        print(f"  ║  EIS 动力系统: {eis_extra['eis_score']:+d}分 × 0.5 = {eis_extra['eis_score']*0.5:+.1f}")
+        print(f"  ║  Triple Screen: {eis_extra['ts_score']:+d}分 × {0.3 if set_name.startswith('A') else 0.2:.1f} "
+              f"= {eis_extra['ts_score']*(0.3 if set_name.startswith('A') else 0.2):+.1f}")
+        print(f"  ║  加权总分: {eis_extra['score']:+.1f}")
+        print(f"  ╠{'─'*68}╣")
+        print(f"  ║  ▶ 可信度: {eis_extra['verdict']}")
+
+        # 风险提示
+        if eis_extra["warnings"]:
+            print(f"  ╠{'─'*68}╣")
+            print(f"  ║  ⚠️ 风险提示:")
+            for w in eis_extra["warnings"]:
+                print(f"  ║    • {w}")
+
+        print(f"  ╚{'═'*68}╝\n", flush=True)
+
     # ── Windows Toast 通知 ──
     if change_type == "signal_change":
         title = f"三重滤网 {set_name}: {contract_name}"
@@ -359,6 +518,16 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
             body += f"\n入场价: {ep:.0f}  止损价: {sp:.0f}  风险: {risk:.0f}"
             if "pending" in new_state["s3_signal"]:
                 body += "\n(预挂单, 待价格触发)"
+        # EIS 验证摘要
+        if eis_extra:
+            eis_line = " | ".join(
+                f"{PERIOD_LABEL.get(p, p)}:{EIS_COLOR_EMOJI.get(c, '')}"
+                for p, _, c, _, _, _, _, _ in eis_extra["eis_details"]
+            )
+            body += f"\n\nEIS验证: {eis_line}"
+            body += f"\n可信度评分: {eis_extra['score']:+.1f}"
+            short_verdict = eis_extra['verdict'].split('—')[0].strip() if '—' in eis_extra['verdict'] else eis_extra['verdict'][:12]
+            body += f"\n{short_verdict}"
     else:
         title = f"趋势反转 {set_name}: {contract_name}"
         body = (f"{TREND_DESC.get(old_state['s1_trend'])} → "
@@ -428,6 +597,9 @@ def print_startup_banner(state):
     print(f"\n  信号触发时机:")
     print(f"    1. Screen 3 状态变化 (pending/triggered/cancelled/no_signal)")
     print(f"    2. Screen 1 趋势反转 (bullish↔bearish)")
+    print(f"  交叉验证:")
+    print(f"    信号触发时自动运行 EIS 动力系统多周期检查")
+    print(f"    加权评分体系: EIS(×0.5) + Triple Screen(×0.3/0.2)")
     print(f"\n  交易时段:")
     print(f"    白盘: 09:00-10:15 / 10:30-11:30 / 13:30-15:00")
     print(f"    夜盘: 21:00-23:00 (CF/C 有夜盘; CJ/JD/LH 仅白盘)")
@@ -599,16 +771,27 @@ def main():
                 new_trend    = new_eval.get("s1_trend", "neutral")
 
                 # ── 信号变化通知 ──
-                if old_combined != new_combined:
-                    fire_signal(set_name, contract_n, "signal_change",
-                                s["current"], new_eval)
+                if old_combined != new_combined or (
+                    old_trend in ("bullish", "bearish")
+                    and new_trend in ("bullish", "bearish")
+                    and old_trend != new_trend
+                ):
+                    # 计算 EIS 交叉验证 (信号变化或趋势反转时)
+                    eis_periods = EIS_PERIODS_FOR_SET.get(set_name, ["daily", "hourly"])
+                    klines_closed_for_eis = {}
+                    for pn in eis_periods:
+                        k = klines_store.get((sym, pn))
+                        if k is not None:
+                            klines_closed_for_eis[pn] = get_closed_klines(k, night)
+                    eis_verify = compute_eis_cross_verify(
+                        klines_closed_for_eis, set_name, new_eval, tick)
 
-                # ── 趋势反转通知 (bullish ↔ bearish, 不算 neutral) ──
-                elif (old_trend in ("bullish", "bearish")
-                      and new_trend in ("bullish", "bearish")
-                      and old_trend != new_trend):
-                    fire_signal(set_name, contract_n, "trend_reversal",
-                                s["current"], new_eval)
+                    if old_combined != new_combined:
+                        fire_signal(set_name, contract_n, "signal_change",
+                                    s["current"], new_eval, eis_extra=eis_verify)
+                    else:
+                        fire_signal(set_name, contract_n, "trend_reversal",
+                                    s["current"], new_eval, eis_extra=eis_verify)
 
                 # ── 静默状态更新 (即使无信号变化, 也刷新 s2_fi 等数值) ──
                 else:
