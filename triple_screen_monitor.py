@@ -791,12 +791,21 @@ def main():
                     eis_verify = compute_eis_cross_verify(
                         klines_closed_for_eis, set_name, new_eval, tick)
 
-                    if old_combined != new_combined:
-                        fire_signal(set_name, contract_n, "signal_change",
-                                    s["current"], new_eval, eis_extra=eis_verify)
+                    # ── EIS 交叉验证门控: 无信号时不提醒 ──
+                    eis_score = eis_verify["score"]
+                    if abs(eis_score) < 0.3 and klines_closed_for_eis:
+                        # 交叉验证结果为"观望/无信号" → 静默, 不弹通知
+                        now_str = datetime.now().strftime("%H:%M:%S")
+                        print(f"\n  [{now_str}] [{set_name}|{contract_n}] "
+                              f"EIS交叉验证: 信号不可信 (得分{eis_score:+.1f}) → 不提醒",
+                              flush=True)
                     else:
-                        fire_signal(set_name, contract_n, "trend_reversal",
-                                    s["current"], new_eval, eis_extra=eis_verify)
+                        if old_combined != new_combined:
+                            fire_signal(set_name, contract_n, "signal_change",
+                                        s["current"], new_eval, eis_extra=eis_verify)
+                        else:
+                            fire_signal(set_name, contract_n, "trend_reversal",
+                                        s["current"], new_eval, eis_extra=eis_verify)
 
                 # ── 静默状态更新 (即使无信号变化, 也刷新 s2_fi 等数值) ──
                 else:
