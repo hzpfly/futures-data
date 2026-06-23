@@ -305,14 +305,14 @@ def test_screen3_pending_short():
 # ── Test 11: Screen 1 趋势判断 ──
 def test_screen1_trend_detection():
     print("\n── Test 11: Screen 1 趋势判断 ──")
-    # 三次方加速上涨 → MACD 柱持续上升 + EMA 上升 → bullish
-    klines_bull = make_accelerating_uptrend(4000, 40, accel=0.05)
+    # 三次方加速上涨 → MACD 柱 bar-to-bar 上升 + EMA 上升 → bullish
+    klines_bull = make_accelerating_uptrend(4000, 30)
     s1_bull = determine_screen1_trend(klines_bull)
     print(f"  加速上涨: trend={s1_bull['trend']}, hist={s1_bull['hist_slope']}, ema={s1_bull['ema_slope']}")
     assert_eq("bullish trend", s1_bull["trend"], "bullish")
 
-    # 三次方加速下跌 → MACD 柱持续下降 + EMA 下降 → bearish
-    klines_bear = make_accelerating_downtrend(5000, 40, accel=0.05)
+    # 三次方加速下跌 → MACD 柱 bar-to-bar 下降 + EMA 下降 → bearish
+    klines_bear = make_accelerating_downtrend(5000, 30)
     s1_bear = determine_screen1_trend(klines_bear)
     print(f"  加速下跌: trend={s1_bear['trend']}, hist={s1_bear['hist_slope']}, ema={s1_bear['ema_slope']}")
     assert_eq("bearish trend", s1_bear["trend"], "bearish")
@@ -349,13 +349,13 @@ def test_force_index_calculation():
 # ── Test 13: 完整级联 — Screen 1 bullish → Screen 2 buy → Screen 3 triggered ──
 def test_full_bullish_cascade():
     print("\n── Test 13: 完整多头级联 (Screen 1→2→3) ──")
-    # Screen 1: 40 根三次方加速上涨 5min klines → bullish
-    klines_5min = make_accelerating_uptrend(4000, 40, accel=0.05)
+    # Screen 1: 30 根三次方加速上涨 5min klines → bullish
+    klines_5min = make_accelerating_uptrend(4000, 30)
     s1 = determine_screen1_trend(klines_5min)
     print(f"  Screen 1: trend={s1['trend']}")
 
     # 在上涨末端加 8 根急跌 → FI 转负 + close 跌破 EMA5 → buy_signal
-    closes_base = [4000 + (i ** 3) * 0.05 for i in range(40)]
+    closes_base = [4000 + (i ** 3) * 0.05 for i in range(30)]
     peak = closes_base[-1]
     closes_pb = closes_base + [peak - i * 50 for i in range(1, 9)]
     klines_5min_pb = make_klines(closes_pb, volumes=[1000] * len(closes_pb))

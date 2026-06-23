@@ -160,7 +160,7 @@ def calc_force_index(klines, ema_span=2):
     return fi_ema
 
 
-def determine_screen1_trend(klines, hist_lookback=5, ema_lookback=10):
+def determine_screen1_trend(klines, hist_lookback=2, ema_lookback=10):
     """
     Elder's Triple Screen — Screen 1: 长期趋势方向过滤
 
@@ -180,7 +180,7 @@ def determine_screen1_trend(klines, hist_lookback=5, ema_lookback=10):
             "hist_recent": [], "ema_recent": (0.0, 0.0),
         }
 
-    # ── MACD histogram slope (5-bar lookback) ──
+    # ── MACD histogram slope (2-bar lookback, Elder: each bar vs previous) ──
     recent_hist = bar.iloc[-hist_lookback:].dropna()
     if len(recent_hist) < hist_lookback:
         hist_slope = "flat"
