@@ -410,6 +410,7 @@ def evaluate_triple_screen(k_s1, k_s2, k_s3, tick_size):
         "s1_ema_recent": s1["ema_recent"],
         "s2_signal":     s2["signal"],
         "s2_fi_value":   s2["fi_value"],
+        "s2_price_confirmed": s2.get("price_confirmed", False),
         "s2_pullback":   s2["pullback_desc"],
         "s3_signal":     s3["signal"],
         "s3_entry":      s3["entry_price"],
@@ -462,7 +463,7 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
         print(f"    MACD柱近5根: {' → '.join(f'{v:.2f}' for v in new_state['s1_hist_recent'])}")
 
     print(f"  Screen 2 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen2_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen2_period'], '')})")
-    print(f"    信号: {new_state['s2_signal']}  | FI: {new_state['s2_fi_value']:.2f}")
+    print(f"    信号: {new_state['s2_signal']}  | FI: {new_state['s2_fi_value']:.2f}  | 价格确认: {'✅' if new_state.get('s2_price_confirmed') else '❌'}")
     print(f"    {new_state['s2_pullback']}")
 
     print(f"  Screen 3 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen3_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen3_period'], '')})")

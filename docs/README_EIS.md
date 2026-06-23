@@ -65,3 +65,59 @@ Because the system is designed to catch short, powerful "impulses" rather than r
 
 * **Chasing the Market:** Because it requires confirmation from both indicators, you will never buy at the exact bottom or sell at the exact top.
 * **False Signals in Ranging Markets:** If a market has absolutely no trend, the color changes can whip-saw back and forth, leading to minor losses if stop-losses are too tight.
+
+---
+
+## Integration in This Project
+
+EIS is used as a **cross-verification system** alongside the Triple Screen trading system. The two systems are independent — Triple Screen identifies entry/exit timing, while EIS confirms market momentum direction.
+
+### Per-Set Independent Verification
+
+Each Triple Screen set has its own EIS period configuration:
+
+| Triple Screen Set | EIS Periods | Purpose |
+|-------------------|-------------|---------|
+| **A_长线** (Weekly→Daily→Hourly) | Weekly / Daily / Hourly | Macro trend confirmation |
+| **B_短线** (Hourly→15min→3min) | Hourly / 15min / 3min | Micro momentum confirmation |
+
+Set A and Set B are evaluated **completely independently** — their scores are never merged.
+
+### Scoring Formula
+
+```
+Total Score = EIS Score × 0.5  +  Triple Screen Score × 0.5
+```
+
+**EIS Score**: Each period gives +1 (GREEN), -1 (RED), or 0 (BLUE). Sum across all periods for the set.
+
+**Triple Screen Score**: S1 trend (±1) + S2 pullback signal (±1) + S3 entry signal (±2). Range: [-4, +4].
+
+### Verdict Levels
+
+| Total Score | Verdict | Action |
+|-------------|---------|--------|
+| >= 2.0 | Strongly Confident | Full position |
+| >= 1.0 | Confident | Normal position |
+| >= 0.3 | Cautious | Half position |
+| >= -0.3 | Wait | No trade (EIS/TS conflict) |
+| >= -1.0 | Cautious Short | |
+| >= -2.0 | Short Confident | |
+| < -2.0 | Strongly Short Confident | |
+
+### Risk Warnings
+
+The system automatically detects and warns about:
+
+1. **Multi-period EIS conflict** — GREEN and RED appear simultaneously across periods → trend is not unified
+2. **Too many BLUE periods** — 2+ BLUE periods → trend is ambiguous, avoid heavy positions
+3. **Fatal EIS/TS direction conflict** — Triple Screen says long but EIS unanimously says short (or vice versa) → signal is unreliable, do not enter
+
+### Related Files
+
+| File | Role |
+|------|------|
+| `weekly_eis.py` | `determine_eis_color()` — core EIS calculation function |
+| `triple_screen_monitor.py` | `compute_eis_cross_verify()` — integrates EIS into the monitor |
+| `eis_monitor.py` | Standalone EIS dual-period monitor (25min + daily) |
+| `scripts/cross_verify_jd.py` | One-shot cross-verification script with Set A/B independent verdicts |

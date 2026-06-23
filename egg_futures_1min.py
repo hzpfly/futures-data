@@ -1,12 +1,20 @@
 """
-鸡蛋主力合约 1/5/25分钟K线实时监控
-自动识别当前主力合约（持仓量最大），免费版天勤不支持 KQ.m@DCE.JD
-周期: 1分钟 / 5分钟 / 25分钟 三周期并行
-更新: 任意周期新 bar 形成时打印全部三个周期
+Triple Screen 核心指标库 + 鸡蛋期货单合约监控
+=============================================
+提供三重滤网全部指标计算函数（与时间周期无关）:
+  - calc_macd / calc_ema / calc_force_index
+  - determine_screen1_trend   (趋势方向过滤)
+  - determine_screen2_signal  (FI + 价格双重回调确认)
+  - determine_screen3_entry   (精确入场 + 止损)
+  - Position / update_position (持仓跟踪 + 退出规则)
+
+也包含鸡蛋主力 1/5/25min 单合约终端监控入口 (main)。
+多合约多周期监控请使用 triple_screen_monitor.py。
 
 用法:
     pip install tqsdk
-    python egg_futures_1min.py
+    python egg_futures_1min.py        # 鸡蛋单合约终端监控
+    python triple_screen_monitor.py   # 多合约多周期监控 (推荐)
 """
 
 from tqsdk import TqApi, TqAuth
@@ -869,6 +877,9 @@ def print_screen2_signal(screen1_trend, klines_5min):
     print(f"  {box_color}╚══════════════════════════════════════════╝\033[0m")
     print(f"  Force Index EMA(2): {screen2['fi_value']:.0f}  |  {fi_pos}")
     print(f"  近5根FI: {fi_vals_str}  |  {cross_text}")
+    # ── 价格回抽确认 ──
+    price_tag = "✅ 价格确认回抽" if screen2.get("price_confirmed") else "❌ 价格未确认"
+    print(f"  价格确认: {price_tag}")
     print(f"  → {screen2['pullback_desc']}")
     print()
 

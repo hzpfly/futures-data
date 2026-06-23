@@ -1,67 +1,136 @@
-# Triple Screen Trading System for Chinese Futures
+# Triple Screen 期货多周期监控系统
 
-基于 Alexander Elder 的三重滤网交易系统 (Triple Screen Trading System)，使用天勤量化 (TqSdk) 实时监控中国期货市场。
+基于 Alexander Elder 三重滤网交易系统 (Triple Screen) + 动力系统 (EIS)，使用天勤量化 (TqSdk) 实时监控中国期货市场 5 个品种的主力合约。
 
-## 系统概述
-
-三重滤网系统的核心思想：**用大周期判断趋势方向，用中周期寻找回调机会，用小周期精确入场**。三层筛选层层过滤，只有当三层信号一致时才入场。
+## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Screen 1 (大周期)  趋势方向过滤                              │
-│  ├─ MACD 柱状图斜率 (主信号)                                  │
-│  └─ EMA(13) 斜率 (确认)                                      │
-│  → 决定只能做多 / 只能做空 / 不交易                            │
-├─────────────────────────────────────────────────────────────┤
-│  Screen 2 (中周期)  振荡器回调信号                            │
-│  ├─ Force Index EMA(2)                                       │
-│  └─ 背离检测 (价格 vs FI)                                    │
-│  → 顺趋势回调时入场：多头+FI<0=买入 / 空头+FI>0=卖出          │
-├─────────────────────────────────────────────────────────────┤
-│  Screen 3 (小周期)  精确入场                                  │
-│  ├─ 买入止损 = 前一根K线最高价 + tick_size                    │
-│  └─ 卖出止损 = 前一根K线最低价 - tick_size                    │
-│  → 价格突破触发入场，设置初始止损                              │
-├─────────────────────────────────────────────────────────────┤
-│  持仓跟踪  退出规则 + 追踪止损                                │
-│  ├─ 1. 止损命中 (intrabar 极值)                               │
-│  ├─ 2. Screen 1 趋势反转                                      │
-│  ├─ 3. 反向背离                                               │
-│  └─ 4. 追踪止损 (N-bar low/high, 单向顺移)                    │
-└─────────────────────────────────────────────────────────────┘
+triple_screen_monitor.py (主监控程序)
+│
+├── Set A (长线):  周线 → 日线 → 小时
+│   (大趋势  /  中期回调  /  精确入场)
+│
+├── Set B (短线):  小时 → 15min → 3min
+│   (大趋势  /  中期回调  /  精确入场)
+│
+├── EIS 交叉验证 (每套独立)
+│   Set A: 周/日/小时 EIS 颜色
+│   Set B: 小时/15min/3min EIS 颜色
+│
+└── 5 个合约 × 2 套滤网 = 10 个监控组合
+    棉花CF / 鸡蛋JD / 生猪LH / 红枣CJ / 玉米C
 ```
 
-## 两种时间周期组合
+两套滤网**完全独立**，各自给出信号和可信度裁决，不合并打分。
 
-### 1. 日内交易组合 (鸡蛋期货 jd)
+## 三重滤网三层筛选
 
-| 层级 | 周期 | 用途 | 持仓时间 |
-|------|------|------|----------|
-| Screen 1 | 25min | 趋势方向 (潮汐) | - |
-| Screen 2 | 5min | 回调信号 (波浪) | - |
-| Screen 3 | 1min | 精确入场 (涟漪) | 分钟~小时 |
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Screen 1 (大周期)  趋势方向过滤                               │
+│  ├─ MACD 柱状图斜率 (主信号)                                   │
+│  └─ EMA(13) 斜率 (确认)                                       │
+│  → 决定只能做多 / 只能做空 / 不交易                             │
+├──────────────────────────────────────────────────────────────┤
+│  Screen 2 (中周期)  振荡器回调信号 (FI + 价格双重确认)         │
+│  ├─ Force Index EMA(2) — 力量方向确认                          │
+│  ├─ close vs EMA(5) — 价格回抽存在性确认                       │
+│  └─ FI 背离检测 — 卖压/买压衰竭确认                            │
+│  → 三步验证: FI<0 + close<EMA(5) = 有效回调                    │
+├──────────────────────────────────────────────────────────────┤
+│  Screen 3 (小周期)  精确入场                                   │
+│  ├─ 买入止损 = 前一根K线最高价 + tick_size                     │
+│  └─ 卖出止损 = 前一根K线最低价 - tick_size                     │
+│  → 价格突破触发入场，设置初始止损                               │
+├──────────────────────────────────────────────────────────────┤
+│  持仓跟踪  退出规则 + 追踪止损                                 │
+│  ├─ 1. 止损命中 (intrabar 极值)                                │
+│  ├─ 2. Screen 1 趋势反转                                       │
+│  ├─ 3. 反向背离                                                │
+│  └─ 4. 追踪止损 (N-bar low/high, 单向顺移)                     │
+└──────────────────────────────────────────────────────────────┘
+```
 
-- 交易所: DCE (大连商品交易所)
-- 合约: jd 主力 (持仓量最大)
-- tick_size: 1 元/500千克
-- 交易时段: 9:00-10:15 / 10:30-11:30 / 13:30-15:00 (无夜盘)
+## 两套时间周期组合
 
-### 2. 持仓交易组合 (棉花期货 cf)
+| 套别 | Screen 1 | Screen 2 | Screen 3 | EIS 验证周期 | 定位 |
+|------|----------|----------|----------|-------------|------|
+| **A_长线** | 周线 | 日线 | 小时 | 周/日/小时 | 持仓数天~数周 |
+| **B_短线** | 小时 | 15min | 3min | 小时/15min/3min | 日内~持仓数小时 |
 
-| 层级 | 周期 | 用途 | 持仓时间 |
-|------|------|------|----------|
-| Screen 1 | Weekly | 趋势方向 (潮汐) | - |
-| Screen 2 | Daily | 回调信号 (波浪) | - |
-| Screen 3 | 15min | 精确入场 (涟漪) | 天~周 |
+- Set A 和 Set B 共享小时线（A 的 Screen 3 = B 的 Screen 1）
+- 每套独立评估，各自给出信号方向和可信度
+- 5 合约 × 5 周期 = 25 个 K 线订阅
 
-- 交易所: CZCE (郑州商品交易所)
-- 合约: CZCE.CF609 (棉花2609)
-- tick_size: 5 元/吨
-- 交易时段: 9:00-10:15 / 10:30-11:30 / 13:30-15:00 + 21:00-23:00 (有夜盘)
+## 监控合约
+
+| 品种 | 交易所 | 代码 | Tick | 夜盘 | 主力发现方式 |
+|------|--------|------|------|------|-------------|
+| 棉花 | CZCE | CF | 5 | 21:00-23:00 | 持仓量最大 |
+| 鸡蛋 | DCE | jd | 1 | 无 | 持仓量最大 |
+| 生猪 | DCE | lh | 5 | 无 | 持仓量最大 |
+| 红枣 | CZCE | CJ | 5 | 无 | 持仓量最大 |
+| 玉米 | DCE | c | 1 | 21:00-23:00 | 持仓量最大 |
+
+主力合约通过 `discover_main_contract_generic()` 自动发现，使用正则精确匹配避免误匹配（如 `c` 不匹配 `cs`）。
+
+## Screen 2 三步回调验证
+
+Screen 2 不是仅看 FI，而是三步验证：
+
+| 验证步骤 | 指标 | 回答的问题 | 角色 |
+|----------|------|-----------|------|
+| 1. Force Index | FI EMA(2) | 空头/多头力量强吗？ | 力量方向确认 |
+| 2. 价格回抽 | close vs EMA(5) | 价格确实跌了/涨了吗？ | 回抽存在性确认 |
+| 3. FI 背离 | FI vs 价格极值 | 卖压/买压衰竭了吗？ | 回抽到位确认 |
+
+**信号规则**:
+
+| Screen 1 趋势 | FI | 价格 vs EMA(5) | 信号 |
+|--------------|-----|----------------|------|
+| 多头 | FI < 0 | close < EMA(5) | `buy_signal` (有效回调) |
+| 多头 | FI < 0 | close >= EMA(5) | `no_signal` (价格未真正回抽) |
+| 多头 | FI >= 0 | — | `no_signal` (趋势延续) |
+| 多头 | FI < 0 + 底背离 | close < EMA(5) | `divergence_buy` (回调到位) |
+| 空头 | FI > 0 | close > EMA(5) | `sell_signal` (有效反弹) |
+| 空头 | FI > 0 | close <= EMA(5) | `no_signal` (价格未真正反弹) |
+| 空头 | FI <= 0 | — | `no_signal` (趋势延续) |
+| 空头 | FI > 0 + 顶背离 | close > EMA(5) | `divergence_sell` (反弹到位) |
+
+## EIS 动力系统交叉验证
+
+信号触发时自动运行 EIS 多周期检查，与 Triple Screen 交叉验证。
+
+**EIS 颜色规则**:
+
+| 颜色 | 条件 | 含义 |
+|------|------|------|
+| GREEN | EMA(13) 上升 + MACD 柱上升 | 多头冲动，只做多 |
+| RED | EMA(13) 下降 + MACD 柱下降 | 空头冲动，只做空 |
+| BLUE | EMA 与 MACD 柱方向相反 | 方向不明，观望 |
+
+**打分**:
+- EIS 各周期 ±1 分 × 0.5 权重
+- Triple Screen: S1 趋势 ±1 + S2 回调 ±1 + S3 入场 ±2，× 0.5 权重
+- 加权总分 → 6 级可信度裁决
+
+**可信度级别**:
+
+| 总分 | 裁决 |
+|------|------|
+| >= 2.0 | 强烈可信 — 主力仓位 |
+| >= 1.0 | 可信 — 正常仓位 |
+| >= 0.3 | 谨慎 — 建议半仓 |
+| >= -0.3 | 观望 — EIS 与 TS 矛盾，不交易 |
+| >= -1.0 | 谨慎偏空 |
+| >= -2.0 | 做空可信 |
+| < -2.0 | 强烈做空可信 |
+
+**风险提示**: 多周期 EIS 冲突、EIS 与 TS 方向致命冲突时自动告警。
 
 ## 指标计算
 
-所有指标函数定义在 `egg_futures_1min.py`，**与时间周期无关**，可应用于任意 OHLCV 数据。
+所有指标函数定义在 `egg_futures_1min.py`，与时间周期无关，可应用于任意 OHLCV 数据。
 
 ### MACD (12, 26, 9)
 ```python
@@ -79,80 +148,65 @@ ema = close.ewm(span=13, adjust=False).mean()
 ```python
 raw_fi = (close - close.shift(1)) * volume   # 原始力度指数
 fi_ema = raw_fi.ewm(span=2, adjust=False).mean()
+# α = 2/(2+1) = 0.6667, 67% 权重给最新 K 线
 ```
 
-### Screen 1 趋势判定逻辑
-- MACD 柱状图斜率：取近 5 根，首尾差值 > 5%×平均绝对值 → 上升/下降
-- EMA(13) 斜率：取近 10 根，首尾差值 > 0.05%×平均价格 → 上升/下降
-- 趋势判定：
-  - 柱上升 + EMA 上升/平 → **多头** (仅做多)
-  - 柱下降 + EMA 下降/平 → **空头** (仅做空)
-  - 其他组合 → **中性** (不交易)
-
-### Screen 2 回调信号逻辑
-- Screen 1 中性 → 立即返回 no_signal (门控)
-- Screen 1 多头 + FI<0 → buy_signal (回调买入)
-- Screen 1 多头 + FI<0 + 底背离 → divergence_buy
-- Screen 1 空头 + FI>0 → sell_signal (反弹卖出)
-- Screen 1 空头 + FI>0 + 顶背离 → divergence_sell
-- 背离检测：使用 window=3 查找局部极值，比较最近两个峰/谷
+### Screen 1 趋势判定
+- MACD 柱斜率：近 5 根首尾差值 > 5%×平均绝对值 → 上升/下降
+- EMA(13) 斜率：近 10 根首尾差值 > 0.05%×平均价格 → 上升/下降
+- 柱上升 + EMA 上升/平 → 多头 | 柱下降 + EMA 下降/平 → 空头 | 其他 → 中性
 
 ### Screen 3 入场逻辑
 - 做多：entry = prev_high + tick_size; stop = min(recent_lows[-N:])
 - 做空：entry = prev_low - tick_size; stop = max(recent_highs[-N:])
-- 当前收盘价 ≥ 买入止损 → triggered_long
-- 当前收盘价 ≤ 卖出止损 → triggered_short
-- N = `STOP_LOOKBACK` (默认 5)，用于初始止损和追踪止损
+- 当前收盘价 >= 买入止损 → triggered_long
+- 当前收盘价 <= 卖出止损 → triggered_short
+- N = STOP_LOOKBACK (默认 5)
 
-## 退出规则 (持仓跟踪)
+## 信号触发时机
 
-持仓状态保存在 `Position` 类中（paper trading，不发真实订单）。
+监控程序在以下情况发出通知 (Windows Toast + 控制台响铃):
 
-**退出优先级**（持仓时按顺序检查）：
+| 变化类型 | 触发条件 | 含义 |
+|----------|----------|------|
+| Screen 3 状态变化 | no_signal → pending_* | 入场机会出现 |
+| Screen 3 状态变化 | pending_* → triggered_* | 实际入场触发 |
+| Screen 3 状态变化 | pending_* → cancelled | 信号取消 |
+| Screen 3 状态变化 | triggered* → no_signal | 信号消失/退出 |
+| Screen 1 趋势反转 | bullish <-> bearish | 决定平仓方向 |
 
-| 优先级 | 规则 | 触发条件 | 平仓价 |
-|--------|------|----------|--------|
-| 1 | 止损命中 | 1min low ≤ current_stop (多头) / high ≥ current_stop (空头) | current_stop |
-| 2 | Screen 1 反转 | 趋势不再支持持仓（含中性） | 当前收盘价 |
-| 3 | 反向背离 | Screen 2 出现反向 divergence | 当前收盘价 |
-| 4 | 追踪止损 | 仍持仓则更新 current_stop（只能顺向移动） | 不平仓 |
+冷却期 180 秒，避免同一 (合约, set, signal) 重复通知。
 
-**追踪止损**：取最近 N 根**已完成** bar 的 low (多头) / high (空头)，单向顺移（多头只升不降，空头只降不升）。
+## 目录结构
 
-## 文件说明
-
-### 核心监控脚本
-
-| 文件 | 模式 | 说明 |
-|------|------|------|
-| `egg_futures_1min.py` | 终端 | 鸡蛋期货三周期实时监控 + 三重滤网 + 持仓跟踪 |
-| `egg_futures_chart.py` | 图形 | Matplotlib 五行子图：25min K线 / MACD / 5min K线 / FI / 1min K线 |
-
-### 测试与回测脚本
-
-| 文件 | 说明 |
-|------|------|
-| `test_bullish_signal.py` | 多头级联回测：S1多头 → S2 buy_signal → S3 triggered_long |
-| `test_bearish_signal.py` | 空头级联回测：S1空头 → S2 sell_signal → S3 triggered_short |
-| `test_exit_rules.py` | 退出规则回测：完整入场→退出生命周期，统计胜率/PnL |
-| `backtest_cf609_wd15.py` | CF609 周/日/15min 级联回测 |
-
-### 探针脚本
-
-| 文件 | 说明 |
-|------|------|
-| `probe_cf609.py` | 探测 CF609 在 25min/5min/1min 的三重滤网信号 |
-| `probe_cf609_wd15.py` | 探测 CF609 在 周/日/15min 的三重滤网信号 |
-
-### 配置与辅助
-
-| 文件 | 说明 |
-|------|------|
-| `config_loader.py` | 共享配置加载模块（从 config.ini 读取天勤账号） |
-| `config.example.ini` | 配置文件模板 |
-| `config.ini` | 真实配置（不提交，含账号密码） |
-| `requirements.txt` | Python 依赖 |
-| `start.bat` | Windows 双击启动 |
+```
+2026-05-18-task-22/
+├── triple_screen_monitor.py   # 主监控程序 (5合约 × 2套滤网 + EIS交叉验证)
+├── egg_futures_1min.py        # 核心指标库 + 鸡蛋单合约监控
+├── egg_futures_chart.py       # Matplotlib 图形模式
+├── eis_monitor.py             # EIS 25min+日线 双周期监控
+├── weekly_eis.py              # 周线/日线 EIS 分析
+├── config_loader.py           # 配置加载
+├── config.ini                 # 天勤账号配置 (不提交)
+├── config.example.ini         # 配置模板
+├── requirements.txt           # Python 依赖
+├── start.bat                  # Windows 启动脚本
+│
+├── scripts/                   # 一次性分析脚本
+│   ├── cross_verify_jd.py     # 交叉验证 (Set A/B 独立裁决)
+│   ├── probe_cf609.py         # CF609 25min/5min/1min 信号探测
+│   ├── probe_cf609_wd15.py    # CF609 周/日/15min 信号探测
+│   └── backtest_cf609_wd15.py # CF609 周/日/15min 级联回测
+│
+├── tests/                     # 测试与回测
+│   ├── test_bullish_signal.py # 多头级联回测
+│   ├── test_bearish_signal.py # 空头级联回测
+│   └── test_exit_rules.py     # 退出规则回测
+│
+└── docs/                      # 文档
+    ├── README.md              # 本文件
+    └── README_EIS.md          # EIS 动力系统说明
+```
 
 ## 快速启动
 
@@ -164,99 +218,62 @@ pip install tqsdk pandas numpy matplotlib
 cp config.example.ini config.ini
 # 编辑 config.ini，填入天勤量化账号和密码
 
-# 3. 运行监控
-python egg_futures_1min.py      # 终端模式
-python egg_futures_chart.py     # 图形模式
+# 3. 运行主监控 (推荐)
+python triple_screen_monitor.py
 
-# 4. 运行回测
-python test_bullish_signal.py   # 多头级联回测
-python test_bearish_signal.py   # 空头级联回测
-python test_exit_rules.py       # 退出规则回测
+# 4. 其他工具
+python egg_futures_1min.py       # 鸡蛋单合约终端监控
+python egg_futures_chart.py      # 图形模式
+python eis_monitor.py            # EIS 双周期监控
+python weekly_eis.py             # 周线/日线 EIS 分析
 
-# 5. CF609 分析
-python probe_cf609.py           # 25min/5min/1min 信号
-python probe_cf609_wd15.py      # 周/日/15min 信号
-python backtest_cf609_wd15.py   # 周/日/15min 级联回测
+# 5. 交叉验证
+python scripts/cross_verify_jd.py
+
+# 6. 回测
+python tests/test_bullish_signal.py
+python tests/test_bearish_signal.py
+python tests/test_exit_rules.py
 ```
 
-Windows 用户可直接双击 `start.bat`。
+Windows 用户可双击桌面 `TripleScreen.bat` 快捷方式启动。
 
-## 回测结果摘要
+## 退出规则 (持仓跟踪)
 
-### 鸡蛋期货 (DCE.jd2608) 25min/5min/1min
+持仓状态保存在 `Position` 类中（paper trading，不发真实订单）。
 
-**数据范围**: 2,000 bars × 3 时间周期 (25min: 9个月, 5min: 2个月, 1min: 9天)
+**退出优先级**（持仓时按顺序检查）:
 
-#### 级联统计 (1,950 根 25min bar)
+| 优先级 | 规则 | 触发条件 | 平仓价 |
+|--------|------|----------|--------|
+| 1 | 止损命中 | 1min low <= current_stop (多头) / high >= current_stop (空头) | current_stop |
+| 2 | Screen 1 反转 | 趋势不再支持持仓（含中性） | 当前收盘价 |
+| 3 | 反向背离 | Screen 2 出现反向 divergence | 当前收盘价 |
+| 4 | 追踪止损 | 仍持仓则更新 current_stop（只能顺向移动） | 不平仓 |
 
-| 指标 | 多头 | 空头 |
-|------|------|------|
-| Screen 1 趋势 | 523 (26.8%) | 467 (23.9%) |
-| Screen 1 中性 | 960 (49.2%) | - |
-| Screen 2 信号 | 217 (208 buy + 9 div) | 156 (147 sell + 9 div) |
-| Screen 3 触发 | 8 long | 33 short |
-| 不变量违反 | 0 | 0 |
-
-#### 退出规则回测 (STOP_LOOKBACK=5, 34 笔交易)
-
-| 指标 | 值 |
-|------|-----|
-| 总交易数 | 34 |
-| 退出原因 | 31 止损命中 / 3 趋势反转 |
-| 胜率 | 26.5% (9/34) |
-| 平均盈利 | +12.3 点 |
-| 平均亏损 | -5.4 点 |
-| 风险回报比 | 2.28 |
-| 总 PnL | -24 点 |
-| 平均持仓 | 7.2 bars |
-
-### 棉花期货 (CZCE.CF609) 周/日/15min
-
-**数据范围**: 1,000 bars × 3 时间周期 (周: ~18年, 日: 4年, 15min: 2个月)
-
-#### 级联统计 (950 周)
-
-| 指标 | 值 |
-|------|-----|
-| Screen 1 多头 | 27 (2.8%) |
-| Screen 1 空头 | 2 (0.2%) |
-| Screen 1 中性 | 921 (96.9%) |
-| Screen 2 buy_signal | 52 + 5 背离 |
-| Screen 2 sell_signal | 2 + 0 背离 |
-| Screen 3 triggered_long | 26 |
-| Screen 3 triggered_short | 0 (15min数据窗口未覆盖空头周) |
-| 不变量违反 | 0 |
-
-**注**: 棉花 18 年历史中 96.9% 的周为中性，符合持仓交易"大部分时间等待"的特征。
+追踪止损：取最近 N 根已完成 bar 的 low (多头) / high (空头)，单向顺移。
 
 ## 系统设计特点
 
-### 1. 无状态信号计算
-所有 `determine_screenN_*` 函数纯函数式，每次调用从当前数据计算，不依赖跨调用状态。便于回测和并行化。
-
-### 2. 级联门控
-Screen 2 在 Screen 1 为中性时立即返回 no_signal，Screen 3 在 Screens 1+2 不一致时返回 none。层层过滤，绝不违反方向纪律。
-
-### 3. Paper Trading 持仓跟踪
-`Position` 类记录入场价、初始止损、追踪止损、峰值利润、退出原因。不发真实订单，仅用于监控和回测。
-
-### 4. 追踪止损单向顺移
-多头止损只升不降，空头止损只降不升。防止止损在错误方向爬行。`STOP_LOOKBACK` 可调（默认 5）。
-
-### 5. 多合约多周期支持
-指标函数与时间周期无关，同一套代码支持鸡蛋 25min/5min/1min 和棉花 周/日/15min。仅需调整 `tick_size` 和 `KLINE_DURS`。
+1. **无状态信号计算** — 所有 `determine_screenN_*` 函数纯函数式，便于回测和并行化
+2. **级联门控** — Screen 2 在 Screen 1 为中性时立即返回 no_signal，Screen 3 在 Screens 1+2 不一致时返回 none
+3. **FI + 价格双重确认** — Screen 2 不只看 FI，还需 close vs EMA(5) 确认价格真正回抽，过滤假回调
+4. **Set A/B 完全独立** — 两套滤网各自评估，不合并打分，避免长短线信号互相稀释
+5. **EIS 交叉验证** — 信号触发时自动多周期 EIS 检查，方向一致才高可信，冲突时强烈警告
+6. **Paper Trading** — 不发真实订单，仅用于监控和回测
+7. **追踪止损单向顺移** — 多头止损只升不降，空头止损只降不升
 
 ## 环境要求
 
 - Python 3.12+ (tqsdk 3.9+)
 - 天勤量化账号（免费版可用，支持 DCE/CZCE/SHFE/CFFEX 等交易所）
 - 依赖: tqsdk, pandas, numpy, matplotlib
+- Windows (使用了 winsound 和 Windows Toast 通知)
 
 ## 理论依据
 
-Alexander Elder, *Trading for a Living* (1993):
-- 三重滤网系统：用不同时间周期替代单一指标的多次确认
-- Force Index：价格变动 × 成交量，反映市场"力度"
-- 追踪止损：跟随趋势移动止损，锁定利润
+Alexander Elder:
+- *Trading for a Living* (1993) — 三重滤网系统、Force Index、追踪止损
+- *Come Into My Trading Room* (2002) — Elder Impulse System (EIS)
 
 > 本系统仅用于学习和监控，不构成投资建议。期货交易风险巨大，请谨慎操作。
