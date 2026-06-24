@@ -96,7 +96,23 @@ TRIPLE_SETS = [
         "screen2_period": "15min",
         "screen3_period": "3min",
     },
+    {
+        "set_name": "C_中线",
+        "desc": "日线/小时/15分钟",
+        "screen1_period": "daily",
+        "screen2_period": "hourly",
+        "screen3_period": "15min",
+    },
 ]
+
+# set_name → set_config 快速索引
+SET_BY_NAME = {s["set_name"]: s for s in TRIPLE_SETS}
+
+# ── 某些合约排除特定周期组合 (波动不足不适配短线) ──
+# key: set_name, value: set of contract names (CONTRACTS 中的 "name" 字段)
+SET_EXCLUDE_CONTRACTS = {
+    "B_短线": {"玉米"},
+}
 
 # 周期 → 秒数
 PERIOD_DUR = {
@@ -152,6 +168,7 @@ TREND_DESC = {
 EIS_PERIODS_FOR_SET = {
     "A_长线": ["weekly", "daily", "hourly"],
     "B_短线": ["hourly", "15min", "3min"],
+    "C_中线": ["daily", "hourly", "15min"],
 }
 
 EIS_COLOR_EMOJI = {"GREEN": "🟢", "RED": "🔴", "BLUE": "🔵"}
@@ -162,6 +179,12 @@ _last_alert_time = {}        # 冷却期记录
 
 
 # ── 工具函数 ──────────────────────────────────────────────
+def is_night_session():
+    """当前是否在夜盘时段 (21:00-23:00)"""
+    now = datetime.now().time()
+    return any(start <= now <= end for start, end in NIGHT_SESSIONS)
+
+
 def is_trading_time(has_night=False):
     """是否在交易时段. CF609 含夜盘"""
     now = datetime.now().time()
@@ -295,7 +318,7 @@ def compute_eis_cross_verify(klines_closed, set_name, ts_eval, tick_size):
         eis_score += pts
         eis_details.append((pn, PERIOD_LABEL.get(pn, pn), c, pts, txt,
                            r.get("ema_slope","?"), r.get("hist_slope","?"),
-                           r.get("hist_cur", 0)))
+                           r.get("hist_cur", 0), r.get("hist_prev", 0)))
 
     # ── 第三步: 本套 Triple Screen 自身打分 ──
     # S1趋势±1 / S2回调信号±1 / S3入场信号±2 → 范围 [-4, +4]
@@ -456,17 +479,36 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
         print(f"  变化: {TREND_DESC.get(old_t, old_t)}  →  {TREND_DESC.get(new_t, new_t)}")
 
     print(f"  {'─'*68}")
-    print(f"  Screen 1 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen1_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen1_period'], '')})")
-    print(f"    趋势: {TREND_DESC.get(new_state['s1_trend'], new_state['s1_trend'])}")
-    print(f"    MACD柱斜率: {new_state['s1_hist_slope']}  EMA(13)斜率: {new_state['s1_ema_slope']}")
-    if new_state.get("s1_hist_recent"):
-        print(f"    MACD柱近5根: {' → '.join(f'{v:.2f}' for v in new_state['s1_hist_recent'])}")
+    print(f"  Screen 1 ({PERIOD_LABEL.get(SET_BY_NAME.get(set_name, {}).get('screen1_period', ''), '')})")
+    s1_t = new_state['s1_trend']
+    s1_hs = new_state['s1_hist_slope']
+    s1_es = new_state['s1_ema_slope']
+    print(f"    趋势: {TREND_DESC.get(s1_t, s1_t)}")
+    # ── MACD 柱 bar-to-bar ──
+    hist_recent = new_state.get("s1_hist_recent", [])
+    if len(hist_recent) >= 2:
+        h_prev, h_cur = hist_recent[0], hist_recent[-1]
+        h_delta = h_cur - h_prev
+        h_thresh = (abs(h_prev) + abs(h_cur)) / 2 * 0.05
+        print(f"    MACD柱: {h_prev:+.2f} → {h_cur:+.2f}  Δ={h_delta:+.2f}  ({s1_hs}, 阈值±{h_thresh:.2f})")
+    elif hist_recent:
+        print(f"    MACD柱: {hist_recent[-1]:+.2f}  ({s1_hs})")
+    else:
+        print(f"    MACD柱斜率: {s1_hs}")
+    # ── EMA(13) 10-bar 斜率 ──
+    ema_recent = new_state.get("s1_ema_recent")
+    if ema_recent and len(ema_recent) == 2:
+        e_cur, e_past = ema_recent[0], ema_recent[1]  # (current, past)
+        e_delta = e_cur - e_past
+        print(f"    EMA(13): {e_past:.2f} → {e_cur:.2f}  Δ={e_delta:+.2f}  ({s1_es})")
+    else:
+        print(f"    EMA(13)斜率: {s1_es}")
 
-    print(f"  Screen 2 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen2_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen2_period'], '')})")
+    print(f"  Screen 2 ({PERIOD_LABEL.get(SET_BY_NAME.get(set_name, {}).get('screen2_period', ''), '')})")
     print(f"    信号: {new_state['s2_signal']}  | FI: {new_state['s2_fi_value']:.2f}  | 价格确认: {'✅' if new_state.get('s2_price_confirmed') else '❌'}")
     print(f"    {new_state['s2_pullback']}")
 
-    print(f"  Screen 3 ({PERIOD_LABEL.get(TRIPLE_SETS[0]['screen3_period'] if set_name.startswith('A') else TRIPLE_SETS[1]['screen3_period'], '')})")
+    print(f"  Screen 3 ({PERIOD_LABEL.get(SET_BY_NAME.get(set_name, {}).get('screen3_period', ''), '')})")
     print(f"    信号: {new_state['s3_signal']}")
     if new_state["s3_signal"] in ("pending_long", "triggered_long", "pending_short", "triggered_short"):
         entry_p = new_state['s3_entry']
@@ -488,11 +530,12 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
         print(f"  ╠{'═'*68}╣")
 
         # 各周期 EIS 颜色
-        for pn, plabel, color, pts, ptxt, ema_s, hist_s, hist_val in eis_extra["eis_details"]:
+        for pn, plabel, color, pts, ptxt, ema_s, hist_s, hist_cur, hist_prev in eis_extra["eis_details"]:
             ce = EIS_COLOR_EMOJI.get(color, "⬜")
+            direction = "↑" if hist_s == "UP" else ("↓" if hist_s == "DOWN" else "→")
             print(f"  ║  [{plabel:<6}] {ce} {color:<5} "
                   f"(EMA{ema_s}/MACD柱{hist_s})  "
-                  f"MACD柱: {hist_val:+.2f}  {ptxt}")
+                  f"MACD柱: {hist_prev:+.2f} {direction} {hist_cur:+.2f}  {ptxt}")
 
         print(f"  ╠{'─'*68}╣")
 
@@ -527,7 +570,7 @@ def fire_signal(set_name, contract_name, change_type, old_state, new_state, eis_
         if eis_extra:
             eis_line = " | ".join(
                 f"{PERIOD_LABEL.get(p, p)}:{EIS_COLOR_EMOJI.get(c, '')}"
-                for p, _, c, _, _, _, _, _ in eis_extra["eis_details"]
+                for p, _, c, _, _, _, _, _, _ in eis_extra["eis_details"]
             )
             body += f"\n\nEIS验证: {eis_line}"
             body += f"\n可信度评分: {eis_extra['score']:+.1f}"
@@ -633,6 +676,7 @@ def main():
             contracts.append({
                 "symbol": symbol,
                 "name": f"{cfg['name']} ({symbol.split('.')[-1].upper()})",
+                "base_name": cfg["name"],  # 用于排除匹配, e.g. "玉米"
                 "tick": cfg["tick"],
                 "night": cfg["night"],
             })
@@ -677,13 +721,25 @@ def main():
         #     "last_dt_per_screen": {"screen1": ns, "screen2": ns, "screen3": ns},
         # }
         state = {}
-        for c in contracts:
+
+        # 夜盘时段无夜盘品种延迟初始化, 记录到 _lazy_contracts (等日盘再补)
+        _lazy_contracts = []
+        _night_now = is_night_session()
+
+        def _init_state_for_contract(c):
+            """为某个合约创建所有 set 的初始状态, 返回新增的 key 列表"""
+            keys = []
             for ts in TRIPLE_SETS:
+                # 检查该 set 是否排除了此合约
+                exclude_names = SET_EXCLUDE_CONTRACTS.get(ts["set_name"], set())
+                if c.get("base_name", c["name"]) in exclude_names:
+                    print(f"  [{ts['set_name']}|{c['name']}] 已排除 (波动不适配), 跳过")
+                    continue
+
                 k_s1 = klines_store[(c["symbol"], ts["screen1_period"])]
                 k_s2 = klines_store[(c["symbol"], ts["screen2_period"])]
                 k_s3 = klines_store[(c["symbol"], ts["screen3_period"])]
 
-                # 用已收盘 K 线
                 k_s1_closed = get_closed_klines(k_s1, c["night"])
                 k_s2_closed = get_closed_klines(k_s2, c["night"])
                 k_s3_closed = get_closed_klines(k_s3, c["night"])
@@ -693,7 +749,8 @@ def main():
                     continue
 
                 init_eval = evaluate_triple_screen(k_s1_closed, k_s2_closed, k_s3_closed, c["tick"])
-                state[(ts["set_name"], c["name"])] = {
+                key = (ts["set_name"], c["name"])
+                state[key] = {
                     "symbol": c["symbol"],
                     "name":   c["name"],
                     "tick":   c["tick"],
@@ -706,6 +763,15 @@ def main():
                         "screen3": get_last_closed_dt(k_s3, c["night"]),
                     },
                 }
+                keys.append(key)
+            return keys
+
+        for c in contracts:
+            if _night_now and not c["night"]:
+                print(f"  [{c['name']}] 无夜盘, 夜盘时段延迟初始化")
+                _lazy_contracts.append(c)
+                continue
+            _init_state_for_contract(c)
 
         if not state:
             print("\n  ⚠️  没有任何监控对象初始化成功, 退出")
@@ -720,6 +786,19 @@ def main():
         while True:
             api.wait_update(deadline=_time.time() + SCAN_SEC)
 
+            # ── 日盘开盘时补初始化无夜盘品种 ──
+            if _lazy_contracts and not is_night_session():
+                newly = []
+                for c in _lazy_contracts:
+                    keys = _init_state_for_contract(c)
+                    newly.extend(keys)
+                if newly:
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    names = ", ".join(c2["name"] for c2 in _lazy_contracts)
+                    print(f"\n  [{now_str}] 日盘开盘: 补初始化 {names}", flush=True)
+                    print_status(state)
+                _lazy_contracts = []
+
             # 检测每个 (set, contract) 状态
             for key, s in state.items():
                 set_name     = key[0]
@@ -728,6 +807,10 @@ def main():
                 sym          = s["symbol"]
                 tick         = s["tick"]
                 night        = s["night"]
+
+                # 夜盘时段跳过无夜盘品种
+                if not night and is_night_session():
+                    continue
 
                 k_s1 = klines_store[(sym, ts["screen1_period"])]
                 k_s2 = klines_store[(sym, ts["screen2_period"])]

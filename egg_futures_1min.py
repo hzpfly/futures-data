@@ -160,7 +160,8 @@ def calc_force_index(klines, ema_span=2):
     return fi_ema
 
 
-def determine_screen1_trend(klines, hist_lookback=2, ema_lookback=10):
+def determine_screen1_trend(klines, hist_lookback=2, ema_lookback=10,
+                              ema_threshold_ratio=0.0005):
     """
     Elder's Triple Screen — Screen 1: 长期趋势方向过滤
 
@@ -202,7 +203,7 @@ def determine_screen1_trend(klines, hist_lookback=2, ema_lookback=10):
     ema_past = ema13.iloc[-ema_lookback]
     ema_diff = ema_current - ema_past
     avg_price = klines["close"].iloc[-ema_lookback:].mean()
-    ema_threshold = avg_price * 0.0005
+    ema_threshold = avg_price * ema_threshold_ratio
     if ema_diff > ema_threshold:
         ema_slope = "rising"
     elif ema_diff < -ema_threshold:
@@ -238,7 +239,7 @@ def _find_local_extrema(series, window=3, mode="max"):
     return extrema
 
 
-def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_window=3,
+def determine_screen2_signal(screen1_trend, klines_s2, lookback=20, swing_window=3,
                               price_ema_span=5):
     """
     Elder's Triple Screen — Screen 2: 中期振荡器回调信号
@@ -264,9 +265,9 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
     if screen1_trend == "neutral":
         return no_signal
 
-    fi = calc_force_index(klines_5min, ema_span=2)
+    fi = calc_force_index(klines_s2, ema_span=2)
     recent_fi = fi.iloc[-lookback:].dropna()
-    recent_close = klines_5min["close"].iloc[-lookback:]
+    recent_close = klines_s2["close"].iloc[-lookback:]
 
     if len(recent_fi) < 5:
         no_signal["pullback_desc"] = "Force Index 数据不足"
@@ -277,7 +278,7 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
     fi_above_zero = fi_value > 0
 
     # ── Price pullback check: close vs short EMA ──
-    close_series = klines_5min["close"]
+    close_series = klines_s2["close"]
     close_ema = close_series.ewm(span=price_ema_span, adjust=False).mean()
     latest_close = close_series.iloc[-1]
     latest_ema = close_ema.iloc[-1]
@@ -296,7 +297,7 @@ def determine_screen2_signal(screen1_trend, klines_5min, lookback=20, swing_wind
     # ── Divergence detection ──
     divergence = "none"
     fi_for_div = fi.iloc[-lookback:].dropna()
-    close_for_div = klines_5min["close"].iloc[-lookback:]
+    close_for_div = klines_s2["close"].iloc[-lookback:]
 
     # Align lengths
     min_len = min(len(fi_for_div), len(close_for_div))
@@ -839,9 +840,9 @@ def print_macd_summary(klines):
     print_macd_detail(klines, ema12, ema26, dif, dea, bar)
 
 
-def print_screen2_signal(screen1_trend, klines_5min):
-    """在 5 分钟 K 线下方打印 Force Index + Elder Screen 2 回调信号"""
-    screen2 = determine_screen2_signal(screen1_trend, klines_5min)
+def print_screen2_signal(screen1_trend, klines_s2):
+    """在 Screen 2 周期 K 线下方打印 Force Index + Elder Screen 2 回调信号"""
+    screen2 = determine_screen2_signal(screen1_trend, klines_s2)
     signal = screen2["signal"]
 
     # ── Signal display styling ──
@@ -884,11 +885,11 @@ def print_screen2_signal(screen1_trend, klines_5min):
     print()
 
     # ── Force Index 详细计算 ──
-    fi = calc_force_index(klines_5min, ema_span=2)
-    recent_5min = klines_5min[klines_5min["close"] > 0]
-    if len(recent_5min) >= 3:
+    fi = calc_force_index(klines_s2, ema_span=2)
+    recent_bars = klines_s2[klines_s2["close"] > 0]
+    if len(recent_bars) >= 3:
         print(f"  ── Force Index 详细计算 | α_ema=2/3=0.6667 ──")
-        last3 = recent_5min.iloc[-3:]
+        last3 = recent_bars.iloc[-3:]
         for j, (i, row) in enumerate(last3.iterrows()):
             t = fmt_time(row["datetime"])
             if j == 0:
