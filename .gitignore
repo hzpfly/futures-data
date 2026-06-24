@@ -43,3 +43,7 @@ config.ini
 
 # ── WorkBuddy 内部文件 ──
 .workbuddy/
+data/
+CZCE.CF609
+DCE.jd2608
+data_main/
